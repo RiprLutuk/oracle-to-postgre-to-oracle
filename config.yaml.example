@@ -1,0 +1,68 @@
+env_file: .env
+
+oracle:
+  dsn: ${ORACLE_DSN}
+  host: ${ORACLE_HOST}
+  port: ${ORACLE_PORT}
+  service_name: ${ORACLE_SERVICE_NAME}
+  sid: ${ORACLE_SID}
+  user: ${ORACLE_USER}
+  password: ${ORACLE_PASSWORD}
+  schema: ${ORACLE_SCHEMA}
+  client_lib_dir: ${ORACLE_CLIENT_LIB_DIR}
+
+postgres:
+  host: ${PG_HOST}
+  port: ${PG_PORT}
+  database: ${PG_DATABASE}
+  user: ${PG_USER}
+  password: ${PG_PASSWORD}
+  schema: ${PG_SCHEMA:-public}
+
+sync:
+  default_direction: oracle-to-postgres
+  default_mode: truncate
+  dry_run: true
+  fast_count: true
+  exact_count_after_load: false
+  parallel_workers: 1
+  batch_size: 10000
+  chunk_size: 50000
+  skip_on_structure_mismatch: true
+  build_indexes_on_staging: true
+  analyze_after_load: true
+  truncate_cascade: false
+  keep_old_after_swap: true
+  copy_null: ""
+  pg_lock_timeout: 5s
+  pg_statement_timeout: "0"
+
+reports:
+  output_dir: reports
+
+rename_columns:
+  public.sample_customer:
+    legacy_status: status
+  public.sample_order:
+    legacy_note: note_text
+
+tables:
+  - name: public.sample_customer
+    oracle_to_postgres_mode: truncate
+    directions:
+      - oracle-to-postgres
+    key_columns: [customer_id]
+
+  - name: public.sample_order
+    oracle_to_postgres_mode: truncate
+    postgres_to_oracle_mode: truncate
+    directions:
+      - oracle-to-postgres
+      - postgres-to-oracle
+    key_columns: [order_id]
+
+  - name: public.sample_audit_log
+    oracle_to_postgres_mode: append
+    directions:
+      - oracle-to-postgres
+    key_columns: [audit_id]

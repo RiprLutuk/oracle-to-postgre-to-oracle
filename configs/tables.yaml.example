@@ -1,0 +1,21 @@
+tables:
+- name: public.sample_customer
+  oracle_to_postgres_mode: truncate
+  directions:
+  - oracle-to-postgres
+  key_columns:
+  - customer_id
+- name: public.sample_order
+  oracle_to_postgres_mode: truncate
+  postgres_to_oracle_mode: truncate
+  directions:
+  - oracle-to-postgres
+  - postgres-to-oracle
+  key_columns:
+  - order_id
+- name: public.sample_audit_log
+  oracle_to_postgres_mode: append
+  directions:
+  - oracle-to-postgres
+  key_columns:
+  - audit_id

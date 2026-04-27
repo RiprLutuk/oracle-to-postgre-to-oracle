@@ -1,0 +1,285 @@
+# User Guide
+
+Dokumen ini adalah panduan utama untuk menjalankan `oracle-pg-sync-audit` dari awal sampai menghasilkan report. Tool ini mendukung dua arah sync:
+
+- Oracle ke PostgreSQL.
+- PostgreSQL ke Oracle.
+
+## 1. Prasyarat
+
+- Python 3.11 atau lebih baru.
+- Akses network dari mesin ini ke Oracle dan PostgreSQL.
+- User Oracle punya privilege baca metadata dan data table target.
+- User PostgreSQL punya privilege baca metadata, insert/copy, truncate, create staging table, rename table untuk mode `swap`, dan analyze.
+- Oracle Instant Client jika environment membutuhkan thick mode.
+
+Privilege Oracle yang biasanya dibutuhkan:
+
+```sql
+SELECT_CATALOG_ROLE
+SELECT ON target_schema.target_table
+SELECT ON V_$DATABASE -- opsional jika nanti memakai snapshot SCN/custom logic
+```
+
+Privilege PostgreSQL yang biasanya dibutuhkan:
+
+```sql
+USAGE ON SCHEMA public
+SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA public
+CREATE ON SCHEMA public
+```
+
+## 2. Install
+
+```bash
+cd /home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Opsional, install sebagai package lokal:
+
+```bash
+pip install -e ".[dev]"
+```
+
+Setelah install editable, command ini tersedia:
+
+```bash
+oracle-pg-sync-audit --help
+```
+
+Tanpa install editable, gunakan:
+
+```bash
+python -m oracle_pg_sync --help
+```
+
+## 3. Setup File Config
+
+```bash
+cp .env.example .env
+cp config.yaml.example config.yaml
+```
+
+Isi `.env` dengan credential real. Jangan commit `.env`.
+
+Contoh minimal:
+
+```dotenv
+ORACLE_HOST=oracle-host.example.com
+ORACLE_PORT=1521
+ORACLE_SERVICE_NAME=ORCLPDB1
+ORACLE_USER=app_reader
+ORACLE_PASSWORD=REPLACE_ME
+ORACLE_SCHEMA=PRD_AMSPBRIM
+
+PG_HOST=postgres-host.example.com
+PG_PORT=5432
+PG_DATABASE=target_db
+PG_USER=sync_user
+PG_PASSWORD=REPLACE_ME
+PG_SCHEMA=public
+```
+
+Jika memakai Oracle DSN penuh, isi `ORACLE_DSN` dan host/service bisa dikosongkan:
+
+```dotenv
+ORACLE_DSN=oracle-host.example.com:1521/ORCLPDB1
+```
+
+## 4. Isi Table Target
+
+Edit `config.yaml`:
+
+```yaml
+tables:
+  - name: public.sample_customer
+    oracle_to_postgres_mode: truncate
+    postgres_to_oracle_mode: truncate
+    directions:
+      - oracle-to-postgres
+      - postgres-to-oracle
+    key_columns: [customer_id]
+```
+
+Nama table boleh `ADDRESS` atau `public.ADDRESS`. Jika schema tidak disebut, default memakai `postgres.schema`.
+
+`config.yaml` bawaan sudah diisi dari script lama di folder `example/`:
+
+- `config.yaml.example` dan `configs/tables.yaml.example` sengaja memakai table dummy.
+- Copy table list real dari environment lokal ke `config.yaml` atau `configs/tables.yaml`.
+
+## 5. Rename Column Mapping
+
+Jika nama kolom Oracle dan PostgreSQL berbeda tapi dianggap equivalent, isi `rename_columns`.
+
+Format mapping adalah Oracle column ke PostgreSQL column:
+
+```yaml
+rename_columns:
+  public.sample_customer:
+    legacy_status: status
+```
+
+Dengan rule ini, Oracle `LEGACY_STATUS` dibandingkan dan disync ke PostgreSQL `status`.
+
+## 6. Audit Pertama
+
+Jalankan audit metadata dan rowcount:
+
+```bash
+python -m oracle_pg_sync audit --config config.yaml
+```
+
+Audit table tertentu:
+
+```bash
+python -m oracle_pg_sync audit --config config.yaml --tables ADDRESS HOUSEMASTER
+```
+
+Gunakan fast count untuk table besar:
+
+```bash
+python -m oracle_pg_sync audit --config config.yaml --fast-count
+```
+
+Gunakan exact count hanya jika siap dengan query berat:
+
+```bash
+python -m oracle_pg_sync audit --config config.yaml --exact-count
+```
+
+## 7. Baca Hasil Audit
+
+File utama:
+
+```text
+reports/inventory_summary.csv
+reports/report.html
+reports/column_diff.csv
+reports/type_mismatch.csv
+```
+
+Interpretasi cepat:
+
+- `MATCH`: struktur dan rowcount match.
+- `WARNING`: struktur match, tapi rowcount tidak match atau count tidak lengkap.
+- `MISMATCH`: ada missing column, extra column, atau type mismatch.
+- `MISSING`: table tidak ada di Oracle atau PostgreSQL.
+
+## 8. Sync Dry-Run
+
+Secara default sync aman karena dry-run. Command ini belum mengubah data:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables ADDRESS
+```
+
+Reverse sync PostgreSQL ke Oracle juga dry-run secara default:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables ADDRESS --mode truncate
+```
+
+Lihat hasilnya di:
+
+```text
+reports/sync_result.csv
+reports/sync.log
+```
+
+Status `DRY_RUN` berarti tool hanya melakukan precheck dan memberi tahu apa yang akan dilakukan.
+
+## 9. Sync Execute
+
+Eksekusi sungguhan wajib pakai `--execute`:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables ADDRESS --execute
+python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables ADDRESS --mode truncate --execute
+```
+
+Jika struktur mismatch, table akan di-skip. Pakai `--force` hanya setelah DBA menyetujui risiko:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables ADDRESS --execute --force
+```
+
+## 10. Generate Report Ulang
+
+Jika CSV sudah ada dan ingin regenerate HTML:
+
+```bash
+python -m oracle_pg_sync report --config config.yaml
+```
+
+## 11. Full Flow
+
+Audit, sync, audit ulang, report:
+
+```bash
+python -m oracle_pg_sync all --config config.yaml --execute
+```
+
+Untuk production, lebih disarankan jalankan bertahap:
+
+```bash
+python -m oracle_pg_sync audit --config config.yaml --fast-count
+python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres
+python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --execute
+python -m oracle_pg_sync audit --config config.yaml --exact-count
+python -m oracle_pg_sync report --config config.yaml
+```
+
+## 12. Mode Sync
+
+`truncate`
+
+- Truncate target lalu load ulang.
+- Cepat, tapi destructive.
+- Butuh `--execute`.
+- Menjaga index, trigger, grants, dan view/materialized view dependency karena table object tidak diganti.
+- Memakai PostgreSQL `pg_lock_timeout` agar gagal cepat kalau table sedang terkunci.
+- Berlaku untuk dua arah.
+
+`swap`
+
+- Buat table staging `table__load`.
+- Copy data ke staging.
+- Verify rowcount staging.
+- Rename live table menjadi old table.
+- Rename staging menjadi live table.
+- Tidak default karena butuh storage staging/old table dan dependency by OID bisa terdampak.
+- Saat ini hanya aktif untuk Oracle ke PostgreSQL.
+
+`append`
+
+- Insert data baru ke target tanpa delete/truncate.
+- Cocok untuk table log/history.
+- Tidak mencegah duplicate.
+- Berlaku untuk dua arah.
+
+`upsert`
+
+- Load staging lalu `INSERT ... ON CONFLICT`.
+- Wajib `key_columns`.
+- PostgreSQL harus punya unique index/constraint sesuai key.
+- Untuk PostgreSQL ke Oracle, memakai Oracle `MERGE`.
+
+`delete`
+
+- Khusus PostgreSQL ke Oracle.
+- Menjalankan `DELETE FROM target` lalu insert ulang.
+- Bisa rollback dalam transaction, tapi lebih berat daripada truncate.
+
+## 13. Output Folder
+
+Semua output masuk ke folder dari `reports.output_dir`, default:
+
+```text
+reports/
+```
+
+File credential tidak pernah ditulis ke report.

@@ -1,0 +1,7 @@
+oracledb>=2.4.1
+psycopg[binary]>=3.2.3
+python-dotenv>=1.0.1
+PyYAML>=6.0.2
+pandas>=2.2.3
+openpyxl>=3.1.5
+pytest>=8.3.4

@@ -1,0 +1,189 @@
+# oracle-pg-sync-audit
+
+Project ini menyatukan audit metadata, compare rowcount, sync data Oracle ke PostgreSQL, sync reverse PostgreSQL ke Oracle, dan reporting DBA dalam satu CLI modular.
+
+## Guide Lengkap
+
+- [Quick Start](docs/USER_GUIDE.md): setup awal, install, isi `.env`, isi `config.yaml`, dan command harian.
+- [Configuration Reference](docs/CONFIG_REFERENCE.md): penjelasan semua field `.env` dan `config.yaml`.
+- [Production Runbook](docs/PRODUCTION_RUNBOOK.md): alur audit, dry-run, eksekusi, validasi, rollback, dan checklist produksi.
+- [Report Reference](docs/REPORT_REFERENCE.md): arti setiap file report dan cara membaca status `MATCH`, `WARNING`, `MISMATCH`, `MISSING`.
+- [Troubleshooting](docs/TROUBLESHOOTING.md): error umum Oracle, PostgreSQL, dependency, rowcount, dan sync.
+- [Developer Guide](docs/DEVELOPER_GUIDE.md): struktur kode, test, dan cara menambah fitur.
+
+## Tujuan
+
+- Sync data dari Oracle ke PostgreSQL.
+- Sync data reverse dari PostgreSQL ke Oracle.
+- Membuat inventory report per table.
+- Membandingkan struktur kolom, tipe data, rowcount, dan dependency object.
+- Menaruh semua output di folder `reports/`.
+- Menjaga safety: `sync` default dry-run, action destructive harus eksplisit dengan `--execute`.
+
+## Struktur
+
+```text
+oracle-pg-sync-audit/
+  README.md
+  requirements.txt
+  .env.example
+  config.yaml.example
+  oracle_pg_sync/
+    cli.py
+    config.py
+    db/
+    metadata/
+    sync/
+    reports/
+    utils/
+  configs/
+  reports/
+  tests/
+```
+
+## Install
+
+```bash
+cd oracle-pg-sync-audit
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Atau install sebagai package lokal supaya command `oracle-pg-sync-audit` tersedia:
+
+```bash
+pip install -e ".[dev]"
+```
+
+Jika memakai Oracle Instant Client thick mode, isi `ORACLE_CLIENT_LIB_DIR` di `.env`.
+
+## Setup Config
+
+```bash
+cp .env.example .env
+cp config.yaml.example config.yaml
+```
+
+Isi koneksi di `.env`. Password tidak hardcode di YAML, cukup pakai placeholder seperti `${ORACLE_PASSWORD}` dan `${PG_PASSWORD}`.
+
+Contoh table config:
+
+```yaml
+tables:
+  - name: public.ADDRESS
+    mode: swap
+    key_columns: [ADDRESS_ID]
+  - name: public.HOUSEMASTER
+    mode: truncate
+```
+
+Rename column Oracle ke PostgreSQL:
+
+```yaml
+rename_columns:
+  public.sample_customer:
+    legacy_status: status
+```
+
+Daftar `tables` di `config.yaml` dan `config.yaml.example` sudah dimigrasikan dari `example/ora2pg.py` dan `example/pg2ora.py`, bukan sample dua table.
+
+## Command
+
+Audit metadata, rowcount, dependency:
+
+```bash
+python -m oracle_pg_sync audit --config config.yaml
+python -m oracle_pg_sync audit --config config.yaml --tables ADDRESS HOUSEMASTER
+```
+
+Sync Oracle ke PostgreSQL dry-run, default aman. Default mode sekarang `truncate` supaya index, trigger, grants, view/materialized view dependency tetap nempel ke table yang sama dan tidak membuat staging table besar:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables ADDRESS
+```
+
+Sync PostgreSQL ke Oracle dry-run:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables ADDRESS --mode truncate
+```
+
+Eksekusi sync sungguhan:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables ADDRESS --execute
+python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables ADDRESS --mode truncate --execute
+```
+
+Generate ulang HTML dari CSV:
+
+```bash
+python -m oracle_pg_sync report --config config.yaml
+```
+
+Audit, sync, audit ulang, report:
+
+```bash
+python -m oracle_pg_sync all --config config.yaml --execute
+```
+
+Jika sudah install editable:
+
+```bash
+oracle-pg-sync-audit audit --config config.yaml
+```
+
+## Output Report
+
+Semua output masuk ke `reports/`:
+
+- `inventory_summary.csv`
+- `inventory_summary.xlsx`
+- `column_diff.csv`
+- `type_mismatch.csv`
+- `object_dependency_summary.csv`
+- `sync_result.csv`
+- `sync.log`
+- `report.html`
+
+`report.html` menampilkan total table, jumlah `MATCH`, `WARNING`, `MISMATCH`, `MISSING`, top table rowcount terbesar, column mismatch, rowcount mismatch, dependency terbesar, dan table yang gagal sync.
+
+## Mode Sync
+
+- `truncate`: truncate target lalu load ulang. Ini default untuk menjaga object table existing seperti index, trigger, grants, view/materialized view dependency.
+- `swap`: create `__load`, copy data, verify rowcount, lalu rename staging menjadi live table. Tidak default karena bisa butuh storage ekstra dan dependency by OID bisa terdampak.
+- `append`: insert data tanpa hapus data lama.
+- `upsert`: load ke staging lalu `INSERT ... ON CONFLICT`, wajib isi `key_columns`.
+- `delete`: khusus PostgreSQL ke Oracle, `DELETE` target lalu insert ulang dalam transaction.
+
+Oracle ke PostgreSQL memakai PostgreSQL `COPY FROM STDIN`. PostgreSQL ke Oracle memakai batch `executemany` dan Oracle `MERGE` untuk upsert.
+
+## Safety Production
+
+- `sync` tidak mengubah data kecuali diberi `--execute`.
+- Default `parallel_workers: 1`, `fast_count: true`, dan `exact_count_after_load: false` supaya tidak terlalu berat di client/server.
+- PostgreSQL `pg_lock_timeout: 5s` membuat sync gagal cepat jika table sedang terkunci, bukan menunggu lock lama.
+- Jika struktur mismatch fatal, table di-skip kecuali pakai `--force`.
+- `swap` menyimpan old table jika `keep_old_after_swap: true`.
+- Jangan aktifkan `truncate_cascade` tanpa approval DBA.
+- Exact count (`--exact-count`) memakai `SELECT COUNT(1)` dan bisa berat di table besar.
+- Untuk table besar, gunakan `fast_count: true` saat audit dan jalankan exact verification hanya saat window maintenance.
+- Log tidak mencetak password.
+
+## Known Limitation
+
+- Dependency rebuild untuk view/materialized view kompleks belum otomatis.
+- Partitioned table dan LOB sangat besar mungkin butuh tuning batch/chunk tambahan.
+- Upsert membutuhkan unique index/constraint di PostgreSQL sesuai `key_columns`.
+- Type compatibility bersifat fuzzy untuk audit; keputusan final perubahan DDL tetap harus direview DBA.
+
+## Development Check
+
+Test unit yang tidak butuh koneksi database:
+
+```bash
+PYTHONPATH=. python -m unittest discover -s tests
+```
+
+Untuk panduan operasional detail, mulai dari [Quick Start](docs/USER_GUIDE.md).
