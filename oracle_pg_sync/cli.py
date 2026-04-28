@@ -24,6 +24,11 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_args(audit)
     audit.add_argument("--tables", nargs="*", help="Override table list")
     audit.add_argument("--tables-file", help="Read table list from YAML/JSON file")
+    audit.add_argument(
+        "--all-postgres-tables",
+        action="store_true",
+        help="Audit all tables discovered from PostgreSQL schema, ignoring config table list",
+    )
     audit.add_argument("--limit", type=int, help="Limit table count after table selection")
     audit.add_argument("--fast-count", action="store_true", help="Use statistic count")
     audit.add_argument("--exact-count", action="store_true", help="Use SELECT COUNT(1)")
@@ -98,7 +103,9 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "fast_count", False):
         config.sync.fast_count = True
 
-    if not tables and args.command == "audit":
+    if args.command == "audit" and args.all_postgres_tables:
+        tables = _apply_limit(_discover_postgres_tables(config, logger), getattr(args, "limit", None))
+    elif not tables and args.command == "audit":
         tables = _discover_postgres_tables(config, logger)
 
     if not tables and args.command != "report":

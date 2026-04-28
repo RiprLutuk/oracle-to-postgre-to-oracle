@@ -51,6 +51,13 @@ Untuk banyak table atau table besar:
 python -m oracle_pg_sync audit --config config.yaml --fast-count
 ```
 
+Untuk compare semua table yang ditemukan di PostgreSQL schema, tanpa bergantung ke `tables.yaml`:
+
+```bash
+python -m oracle_pg_sync audit --config config.yaml --all-postgres-tables --fast-count
+python -m oracle_pg_sync audit --config config.yaml --all-postgres-tables --limit 10 --fast-count
+```
+
 Untuk subset:
 
 ```bash

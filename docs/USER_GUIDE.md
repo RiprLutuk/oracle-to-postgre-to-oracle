@@ -135,6 +135,13 @@ python -m oracle_pg_sync audit --config config.yaml
 
 Jika `tables` di config kosong, audit otomatis mengambil semua table dari PostgreSQL schema yang diset di config.
 
+Kalau `config.yaml` tetap punya table list tapi ingin compare semua table yang ada di PostgreSQL schema:
+
+```bash
+python -m oracle_pg_sync audit --config config.yaml --all-postgres-tables --fast-count
+python -m oracle_pg_sync audit --config config.yaml --all-postgres-tables --limit 10 --fast-count
+```
+
 Audit table tertentu:
 
 ```bash

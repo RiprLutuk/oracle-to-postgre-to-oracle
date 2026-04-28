@@ -97,10 +97,11 @@ Audit metadata, rowcount, dependency:
 ```bash
 python -m oracle_pg_sync audit --config config.yaml
 python -m oracle_pg_sync audit --config config.yaml --tables sample_customer sample_order
+python -m oracle_pg_sync audit --config config.yaml --all-postgres-tables --fast-count
 python -m oracle_pg_sync audit --config config.yaml --suggest-drop --sql-out reports/schema_suggestions.sql
 ```
 
-Kalau `tables` kosong, command `audit` otomatis mengambil semua table dari PostgreSQL schema di config, sama seperti script `example/verify_oracle_pg.py` lama. Hasil audit juga membuat `reports/schema_suggestions.sql` berisi saran `ALTER TABLE ADD COLUMN`; opsi `--suggest-drop` menambahkan saran `DROP COLUMN` untuk kolom yang hanya ada di PostgreSQL.
+Kalau `tables` kosong, command `audit` otomatis mengambil semua table dari PostgreSQL schema di config, sama seperti script `example/verify_oracle_pg.py` lama. Jika config masih punya table list tapi ingin compare semua table PostgreSQL, gunakan `--all-postgres-tables`. Hasil audit juga membuat `reports/schema_suggestions.sql` berisi saran `ALTER TABLE ADD COLUMN`; opsi `--suggest-drop` menambahkan saran `DROP COLUMN` untuk kolom yang hanya ada di PostgreSQL.
 
 Sync Oracle ke PostgreSQL dry-run, default aman. Default mode sekarang `truncate` supaya index, trigger, grants, view/materialized view dependency tetap nempel ke table yang sama dan tidak membuat staging table besar:
 

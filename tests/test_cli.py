@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from oracle_pg_sync.cli import _resolve_tables
+from oracle_pg_sync.cli import _resolve_tables, build_parser
 from oracle_pg_sync.config import AppConfig, OracleConfig, PostgresConfig, TableConfig
 
 
@@ -46,6 +46,12 @@ tables:
         tables = _resolve_tables(config, ["sample_customer", "sample_order"], direction="oracle-to-postgres")
 
         self.assertEqual(tables, ["sample_customer", "sample_order"])
+
+    def test_audit_accepts_all_postgres_tables_flag(self):
+        args = build_parser().parse_args(["audit", "--all-postgres-tables", "--limit", "10"])
+
+        self.assertTrue(args.all_postgres_tables)
+        self.assertEqual(args.limit, 10)
 
 
 if __name__ == "__main__":
