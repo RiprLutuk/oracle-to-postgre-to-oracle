@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import csv
 import logging
+import os
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -21,6 +23,8 @@ def build_parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", help="Cek metadata, rowcount, dependency")
     _add_common_args(audit)
     audit.add_argument("--tables", nargs="*", help="Override table list")
+    audit.add_argument("--tables-file", help="Read table list from YAML/JSON file")
+    audit.add_argument("--limit", type=int, help="Limit table count after table selection")
     audit.add_argument("--fast-count", action="store_true", help="Use statistic count")
     audit.add_argument("--exact-count", action="store_true", help="Use SELECT COUNT(1)")
     audit.add_argument("--workers", type=int, default=1, help="Parallel audit workers. Default 1 agar ringan")
@@ -30,6 +34,8 @@ def build_parser() -> argparse.ArgumentParser:
     sync = sub.add_parser("sync", help="Sync data antar Oracle dan PostgreSQL")
     _add_common_args(sync)
     sync.add_argument("--tables", nargs="*", help="Override table list")
+    sync.add_argument("--tables-file", help="Read table list from YAML/JSON file")
+    sync.add_argument("--limit", type=int, help="Limit table count after table selection")
     sync.add_argument(
         "--direction",
         choices=["oracle-to-postgres", "postgres-to-oracle"],
@@ -46,6 +52,8 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd = sub.add_parser("all", help="Audit, sync, audit ulang, lalu report")
     _add_common_args(all_cmd)
     all_cmd.add_argument("--tables", nargs="*", help="Override table list")
+    all_cmd.add_argument("--tables-file", help="Read table list from YAML/JSON file")
+    all_cmd.add_argument("--limit", type=int, help="Limit table count after table selection")
     all_cmd.add_argument(
         "--direction",
         choices=["oracle-to-postgres", "postgres-to-oracle"],
@@ -71,10 +79,18 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
+    if args.command in {"audit", "sync", "all"}:
+        _ensure_oracle_client_library_path(config, argv)
     report_dir = Path(config.reports.output_dir)
     logger = setup_logging(report_dir, logging.DEBUG if args.verbose else logging.INFO)
     direction = _resolve_direction(config, getattr(args, "direction", None)) if args.command in {"sync", "all"} else None
-    tables = _resolve_tables(config, getattr(args, "tables", None), direction=direction)
+    tables = _resolve_tables(
+        config,
+        getattr(args, "tables", None),
+        direction=direction,
+        tables_file=getattr(args, "tables_file", None),
+        limit=getattr(args, "limit", None),
+    )
 
     if getattr(args, "exact_count", False):
         config.sync.fast_count = False
@@ -292,12 +308,81 @@ def _merge_audit_result(
     dependency_rows.extend(dependencies)
 
 
-def _resolve_tables(config: AppConfig, override: list[str] | None, *, direction: str | None = None) -> list[str]:
+def _resolve_tables(
+    config: AppConfig,
+    override: list[str] | None,
+    *,
+    direction: str | None = None,
+    tables_file: str | None = None,
+    limit: int | None = None,
+) -> list[str]:
+    if limit is not None and limit < 1:
+        raise SystemExit("--limit must be greater than 0")
     if override:
-        return override
+        return _apply_limit(override, limit)
+    if tables_file:
+        return _apply_limit(_read_table_names_file(Path(tables_file), direction=direction), limit)
     if direction:
-        return config.table_names_for_direction(direction)
-    return config.table_names()
+        return _apply_limit(config.table_names_for_direction(direction), limit)
+    return _apply_limit(config.table_names(), limit)
+
+
+def _apply_limit(tables: list[str], limit: int | None) -> list[str]:
+    return tables[:limit] if limit is not None else tables
+
+
+def _read_table_names_file(path: Path, *, direction: str | None = None) -> list[str]:
+    if not path.exists():
+        raise SystemExit(f"Tables file not found: {path}")
+    raw = _read_structured_file(path)
+    rows = raw.get("tables") if isinstance(raw, dict) else raw
+    if not isinstance(rows, list):
+        raise SystemExit(f"Tables file must contain a list or a 'tables' list: {path}")
+    tables: list[str] = []
+    for row in rows:
+        if isinstance(row, str):
+            tables.append(row)
+            continue
+        if not isinstance(row, dict):
+            continue
+        directions = [str(item).lower() for item in row.get("directions", [])]
+        if direction and directions and direction not in directions:
+            continue
+        name = str(row.get("name") or "").strip()
+        if name:
+            tables.append(name)
+    return tables
+
+
+def _read_structured_file(path: Path):
+    text = path.read_text(encoding="utf-8")
+    if path.suffix.lower() == ".json":
+        import json
+
+        return json.loads(text)
+    try:
+        import yaml
+    except ModuleNotFoundError as exc:
+        raise SystemExit("PyYAML belum terinstall. Jalankan: pip install -r requirements.txt") from exc
+    return yaml.safe_load(text) or {}
+
+
+def _ensure_oracle_client_library_path(config: AppConfig, argv: list[str] | None) -> None:
+    lib_dir = config.oracle.client_lib_dir
+    if not lib_dir or os.name == "nt" or os.environ.get("ORACLE_PG_SYNC_REEXEC") == "1":
+        return
+    lib_path = str(Path(lib_dir).expanduser())
+    current = os.environ.get("LD_LIBRARY_PATH", "")
+    paths = [item for item in current.split(":") if item]
+    if lib_path in paths:
+        return
+    if not Path(lib_path).exists():
+        return
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = lib_path if not current else f"{lib_path}:{current}"
+    env["ORACLE_PG_SYNC_REEXEC"] = "1"
+    script_args = [sys.executable, "-m", "oracle_pg_sync", *(sys.argv[1:] if argv is None else argv)]
+    os.execvpe(sys.executable, script_args, env)
 
 
 def _discover_postgres_tables(config: AppConfig, logger: logging.Logger) -> list[str]:

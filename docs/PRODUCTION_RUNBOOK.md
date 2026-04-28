@@ -97,6 +97,13 @@ Atau table tertentu:
 python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables sample_customer
 ```
 
+Atau table list lokal terpisah:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables-file configs/tables.yaml
+python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables-file configs/tables.yaml --limit 10
+```
+
 Untuk reverse sync PostgreSQL ke Oracle:
 
 ```bash

@@ -106,6 +106,7 @@ Sync Oracle ke PostgreSQL dry-run, default aman. Default mode sekarang `truncate
 
 ```bash
 python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables sample_customer
+python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables-file configs/tables.yaml --limit 10
 ```
 
 Sync PostgreSQL ke Oracle dry-run:

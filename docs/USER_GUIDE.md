@@ -193,6 +193,13 @@ Secara default sync aman karena dry-run. Command ini belum mengubah data:
 python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables sample_customer
 ```
 
+Untuk table list lokal yang terpisah dari `config.yaml`:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables-file configs/tables.yaml
+python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables-file configs/tables.yaml --limit 10
+```
+
 Reverse sync PostgreSQL ke Oracle juga dry-run secara default:
 
 ```bash
