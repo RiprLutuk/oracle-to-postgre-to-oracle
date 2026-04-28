@@ -265,13 +265,22 @@ tables:
 
 `strategy` dapat berisi `updated_at`, `numeric_key`, atau `oracle_scn`. `oracle_scn` saat ini akan gagal dengan pesan jelas karena Flashback/SCN belum diaktifkan.
 
+Table list sebaiknya hanya di satu tempat. Untuk production, gunakan:
+
+```yaml
+tables_file: configs/tables.yaml
+```
+
+Jangan isi `tables:` inline bersamaan dengan `tables_file`; loader akan menolak kombinasi itu agar tidak ada dua sumber table yang berbeda.
+
 Checksum validation:
 
 ```yaml
 validation:
   checksum:
     enabled: true
-    mode: table
+    mode: chunk
+    batch_size: 5000
     columns: auto
     exclude_columns:
       - BLOB_PAYLOAD
@@ -283,15 +292,38 @@ LOB strategy:
 ```yaml
 lob_strategy:
   default: error
+  stream_batch_size: 100
+  lob_chunk_size_bytes: 1048576
+  validation:
+    default: size
+    hash_algorithm: sha256
+  warn_on_lob_larger_than_mb: 50
+  fail_on_lob_larger_than_mb: null
 
 tables:
   - name: public.sample_blob_table
     lob_strategy:
       columns:
-        BLOB_PAYLOAD: null
+        BLOB_PAYLOAD:
+          strategy: stream
+          target_type: bytea
+          validation: size_hash
+        JSON_DATA:
+          strategy: stream
+          target_type: text
+          validation: size_hash
 ```
 
-Pilihan LOB: `skip`, `null`, `stream`, `error`.
+Pilihan LOB: `skip`, `null`, `stream`, `include`, `error`.
+
+Tipe Oracle LOB yang didukung:
+
+- `BLOB` -> PostgreSQL `bytea`
+- `CLOB` dan `NCLOB` -> PostgreSQL `text`
+- `LONG` -> PostgreSQL `text` jika driver/table mengizinkan pembacaan
+- `LONG RAW` -> PostgreSQL `bytea` jika driver/table mengizinkan pembacaan
+
+Default tetap aman: `error`. Nilai LOB mentah tidak ditulis ke log/report/manifest.
 
 ## reports
 

@@ -91,7 +91,7 @@ rename_columns:
     legacy_status: status
 ```
 
-Daftar `tables` real disimpan di file lokal `config.yaml` atau `configs/tables.yaml` dan tidak ikut Git. File `*.example` berisi dummy supaya aman dipublish.
+Daftar `tables` real disimpan di satu tempat: `configs/tables.yaml`. `config.yaml` cukup memakai `tables_file: configs/tables.yaml` untuk menghindari dua table list yang bisa berbeda.
 
 ## Command
 
@@ -189,7 +189,8 @@ Oracle ke PostgreSQL memakai PostgreSQL `COPY FROM STDIN`. PostgreSQL ke Oracle 
 - Checkpoint SQLite disimpan di `reports/checkpoints/` dan dapat dipakai untuk `--resume RUN_ID`.
 - Incremental sync memakai watermark tersimpan dan hanya mengupdate watermark setelah sync sukses.
 - Checksum validation dapat diaktifkan untuk mendeteksi mismatch data selain rowcount.
-- LOB sync default `error`; pilih `skip`, `null`, atau `stream` secara eksplisit.
+- LOB sync default `error`; pilih `skip`, `null`, `stream`, atau `include` secara eksplisit. Oracle `BLOB`, `CLOB`, `NCLOB`, `LONG`, dan `LONG RAW` terdeteksi end-to-end, dengan mapping aman ke PostgreSQL `bytea`/`text`.
+- DBA shortcut CLI tersedia sebagai `ops`, misalnya `ops sync --go --lob stream`, `ops resume RUN_ID`, `ops status`, `ops watermarks`, dan `ops reset-watermark TABLE`.
 - Default `parallel_workers: 1`, `fast_count: true`, dan `exact_count_after_load: false` supaya tidak terlalu berat di client/server.
 - PostgreSQL `pg_lock_timeout: 5s` membuat sync gagal cepat jika table sedang terkunci, bukan menunggu lock lama.
 - Jika struktur mismatch fatal, table di-skip kecuali pakai `--force`.

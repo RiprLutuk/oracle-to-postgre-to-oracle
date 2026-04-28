@@ -40,6 +40,8 @@ sync:
   pg_lock_timeout: 5s
   pg_statement_timeout: "0"
   checkpoint_dir: reports/checkpoints/checkpoint.sqlite3
+  truncate_resume_strategy: staging
+  staging_schema: null
 
 reports:
   output_dir: reports
@@ -47,7 +49,9 @@ reports:
 validation:
   checksum:
     enabled: false
-    mode: table
+    mode: chunk
+    batch_size: 5000
+    chunk_key: null
     columns: auto
     exclude_columns: []
     sample_percent: 1
@@ -55,6 +59,13 @@ validation:
 lob_strategy:
   # Sync default is intentionally safe: fail if a LOB is detected unless a table/column overrides it.
   default: error
+  stream_batch_size: 100
+  lob_chunk_size_bytes: 1048576
+  validation:
+    default: size
+    hash_algorithm: sha256
+  warn_on_lob_larger_than_mb: 50
+  fail_on_lob_larger_than_mb: null
   columns: {}
 
 rename_columns:
@@ -79,7 +90,7 @@ tables:
     validation:
       checksum:
         enabled: true
-        mode: batch
+        mode: chunk
         columns: auto
         exclude_columns: []
 
@@ -115,10 +126,26 @@ tables:
       overlap_minutes: 10
     lob_strategy:
       columns:
-        BLOB_PAYLOAD: null
+        BLOB_PAYLOAD:
+          strategy: stream
+          target_type: bytea
+          validation: size_hash
     validation:
       checksum:
         enabled: true
-        mode: batch
+        mode: chunk
         exclude_columns:
           - BLOB_PAYLOAD
+
+  - source_schema: SAMPLE_APP
+    source_table: SAMPLE_CLOB_TABLE
+    target_schema: public
+    target_table: sample_clob_table
+    primary_key:
+      - record_id
+    lob_strategy:
+      columns:
+        JSON_DATA:
+          strategy: stream
+          target_type: text
+          validation: size_hash

@@ -8,16 +8,17 @@ from oracle_pg_sync.db.postgres import table_ident
 from oracle_pg_sync.utils.naming import pg_old_name, pg_staging_name
 
 
-def create_staging_like(cur, schema: str, table: str) -> str:
+def create_staging_like(cur, schema: str, table: str, *, staging_schema: str | None = None) -> tuple[str, str]:
+    target_schema = staging_schema or schema
     staging = pg_staging_name(table)
-    cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(table_ident(schema, staging)))
+    cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(table_ident(target_schema, staging)))
     cur.execute(
         sql.SQL("CREATE TABLE {} (LIKE {} INCLUDING ALL)").format(
-            table_ident(schema, staging),
+            table_ident(target_schema, staging),
             table_ident(schema, table),
         )
     )
-    return staging
+    return target_schema, staging
 
 
 def atomic_swap(cur, schema: str, table: str) -> str:

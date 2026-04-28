@@ -11,6 +11,7 @@ def write_html_report(
     inventory_rows: list[dict],
     column_diff_rows: list[dict],
     sync_rows: list[dict] | None = None,
+    checksum_rows: list[dict] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     sync_rows = sync_rows or []
@@ -22,7 +23,8 @@ def write_html_report(
     )[:10]
     rowcount_mismatch = [row for row in inventory_rows if not row.get("row_count_match")]
     failed_sync = [row for row in sync_rows if row.get("status") in {"FAILED", "WARNING", "SKIPPED"}]
-    checksum_rows = [row for row in sync_rows if row.get("checksum_status")]
+    checksum_rows = checksum_rows or [row for row in sync_rows if row.get("checksum_status")]
+    lob_rows = [row for row in sync_rows if row.get("lob_columns_detected")]
     dependency_heavy = sorted(
         inventory_rows,
         key=lambda row: int(row.get("view_count_related_oracle") or 0)
@@ -32,11 +34,14 @@ def write_html_report(
         reverse=True,
     )[:10]
     manifests = sorted(path.parent.glob("run_*/manifest.json"), reverse=True)
-    manifest_link = (
-        f'<p>Latest manifest: <a href="{escape(str(manifests[0].relative_to(path.parent)))}">manifest.json</a></p>'
+    manifest_link = f'<a href="manifest.json">manifest.json</a>' if (path.parent / "manifest.json").exists() or path.parent.name.startswith("run_") else (
+        f'<a href="{escape(str(manifests[0].relative_to(path.parent)))}">manifest.json</a>'
         if manifests
         else ""
     )
+    workbook_link = '<a href="report.xlsx">report.xlsx</a>' if (path.parent / "report.xlsx").exists() else ""
+    links = " | ".join(item for item in [manifest_link, workbook_link] if item)
+    links_html = f"<p>{links}</p>" if links else ""
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -57,7 +62,7 @@ def write_html_report(
 </head>
 <body>
   <h1>Oracle PostgreSQL Sync Audit</h1>
-  {manifest_link}
+  {links_html}
   <div class="metrics">
     <div class="metric">Total Table<strong>{len(inventory_rows)}</strong></div>
     <div class="metric">MATCH<strong>{status_counts.get("MATCH", 0)}</strong></div>
@@ -76,7 +81,9 @@ def write_html_report(
   <h2>Sync Bermasalah</h2>
   {_table(failed_sync[:100], ["table_name", "mode", "status", "rows_loaded", "message"])}
   <h2>Checksum Validation</h2>
-  {_table(checksum_rows[:100], ["table_name", "checksum_status", "checksum_source_rows", "checksum_target_rows", "checksum_source_hash", "checksum_target_hash"])}
+  {_table(checksum_rows[:100], ["table_name", "chunk_key", "status", "row_count_source", "row_count_target", "source_hash", "target_hash"])}
+  <h2>LOB Summary</h2>
+  {_table(lob_rows[:100], ["table_name", "lob_columns_detected", "lob_columns_synced", "lob_type", "lob_target_type", "lob_strategy_applied", "lob_validation_mode"])}
 </body>
 </html>
 """

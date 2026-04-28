@@ -591,6 +591,25 @@ def truncate_table(cur, schema: str, table: str, *, cascade: bool = False) -> No
     cur.execute(stmt)
 
 
+def insert_from_table(
+    cur,
+    *,
+    target_schema: str,
+    target_table: str,
+    source_schema: str,
+    source_table: str,
+    columns: list[str],
+) -> None:
+    cols = sql.SQL(", ").join(sql.Identifier(col) for col in columns)
+    stmt = sql.SQL("INSERT INTO {} ({}) SELECT {} FROM {}").format(
+        table_ident(target_schema, target_table),
+        cols,
+        cols,
+        table_ident(source_schema, source_table),
+    )
+    cur.execute(stmt)
+
+
 def analyze_table(cur, schema: str, table: str) -> None:
     cur.execute(sql.SQL("ANALYZE {}").format(table_ident(schema, table)))
 

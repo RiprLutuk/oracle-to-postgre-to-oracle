@@ -109,7 +109,7 @@ Nama table boleh `sample_customer` atau `public.sample_customer`. Jika schema ti
 `config.yaml` bawaan sudah diisi dari script lama di folder `example/`:
 
 - `config.yaml.example` dan `configs/tables.yaml.example` sengaja memakai table dummy.
-- Copy table list real dari environment lokal ke `config.yaml` atau `configs/tables.yaml`.
+- Copy table list real dari environment lokal ke `configs/tables.yaml`, lalu pastikan `config.yaml` berisi `tables_file: configs/tables.yaml`.
 
 ## 5. Rename Column Mapping
 
@@ -295,7 +295,7 @@ tables:
     validation:
       checksum:
         enabled: true
-        mode: batch
+        mode: chunk
         exclude_columns:
           - BLOB_PAYLOAD
 ```

@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from psycopg import sql
@@ -11,14 +11,14 @@ from psycopg import sql
 from oracle_pg_sync.checkpoint import CheckpointStore, Chunk, new_run_id
 from oracle_pg_sync.config import AppConfig, TableConfig
 from oracle_pg_sync.db import oracle, postgres
-from oracle_pg_sync.lob import apply_lob_mapping_policy
+from oracle_pg_sync.lob import apply_lob_mapping_policy, lob_summary_to_fields
 from oracle_pg_sync.metadata.compare import compare_table_metadata, inventory_has_fatal_mismatch
 from oracle_pg_sync.metadata.oracle_metadata import fetch_table_metadata as fetch_oracle_metadata
 from oracle_pg_sync.metadata.postgres_metadata import fetch_table_metadata as fetch_pg_metadata
 from oracle_pg_sync.sync.copy_loader import copy_rows
 from oracle_pg_sync.sync.staging import atomic_swap, create_staging_like, drop_table
 from oracle_pg_sync.utils.naming import oracle_name, split_schema_table
-from oracle_pg_sync.validation import checksum_columns, checksum_result_row, stable_row_hash
+from oracle_pg_sync.validation import checksum_columns, checksum_result_row, stable_cursor_hash
 
 
 @dataclass
@@ -39,10 +39,15 @@ class SyncResult:
     checksum_target_hash: str = ""
     checksum_source_rows: int | None = None
     checksum_target_rows: int | None = None
+    checksum_rows: list[dict[str, Any]] = field(default_factory=list)
     lob_columns_detected: str = ""
+    lob_columns_synced: str = ""
     lob_strategy_applied: str = ""
     lob_columns_skipped: str = ""
     lob_columns_nullified: str = ""
+    lob_type: str = ""
+    lob_target_type: str = ""
+    lob_validation_mode: str = ""
 
     def as_row(self) -> dict[str, Any]:
         return {
@@ -64,9 +69,13 @@ class SyncResult:
             "checksum_source_rows": self.checksum_source_rows,
             "checksum_target_rows": self.checksum_target_rows,
             "lob_columns_detected": self.lob_columns_detected,
+            "lob_columns_synced": self.lob_columns_synced,
             "lob_strategy_applied": self.lob_strategy_applied,
             "lob_columns_skipped": self.lob_columns_skipped,
             "lob_columns_nullified": self.lob_columns_nullified,
+            "lob_type": self.lob_type,
+            "lob_target_type": self.lob_target_type,
+            "lob_validation_mode": self.lob_validation_mode,
         }
 
 
@@ -241,7 +250,14 @@ class OracleToPostgresSync:
 
                     chunks = self._plan_chunks(ocur, owner, source_table, table_cfg, effective_where)
                     successful = checkpoint_store.successful_chunks(run_id, table.fqname) if checkpoint_store and resume else set()
-                    if mode == "truncate" and not successful:
+                    if mode == "truncate":
+                        successful = self._truncate_resume_successful_chunks(
+                            table.fqname,
+                            successful,
+                            resume=resume,
+                        )
+                    truncate_strategy = (self.config.sync.truncate_resume_strategy or "restart_table").lower()
+                    if mode == "truncate" and truncate_strategy != "staging" and not successful:
                         postgres.set_local_timeouts(
                             pcur,
                             lock_timeout=self.config.sync.pg_lock_timeout,
@@ -255,19 +271,33 @@ class OracleToPostgresSync:
                             "lock_timeout=%s",
                             self.config.sync.pg_lock_timeout,
                         )
-                        rows = self._copy_chunks(
-                            ocur,
-                            pcur,
-                            owner,
-                            table.schema,
-                            source_table,
-                            table.table,
-                            mapping,
-                            chunks,
-                            checkpoint_store=checkpoint_store,
-                            run_id=run_id,
-                            resume_successful=successful,
-                        )
+                        if truncate_strategy == "staging":
+                            rows = self._sync_truncate_staging(
+                                ocur,
+                                pcur,
+                                owner,
+                                table.schema,
+                                source_table,
+                                table.table,
+                                mapping,
+                                chunks,
+                                checkpoint_store=checkpoint_store,
+                                run_id=run_id,
+                            )
+                        else:
+                            rows = self._copy_chunks(
+                                ocur,
+                                pcur,
+                                owner,
+                                table.schema,
+                                source_table,
+                                table.table,
+                                mapping,
+                                chunks,
+                                checkpoint_store=checkpoint_store,
+                                run_id=run_id,
+                                resume_successful=successful,
+                            )
                     elif mode == "swap":
                         guard_message = self._swap_guard_message(table.fqname, swap_size, force=force)
                         if guard_message:
@@ -306,9 +336,18 @@ class OracleToPostgresSync:
                         raise ValueError(f"Unsupported sync mode: {mode}")
 
                     result.rows_loaded = rows
+                    if mode == "truncate":
+                        self._mark_table_phase(
+                            checkpoint_store,
+                            run_id,
+                            table.fqname,
+                            "table_loaded",
+                            rows_attempted=rows,
+                            rows_success=rows,
+                        )
                     if self.config.sync.analyze_after_load:
                         postgres.analyze_table(pcur, table.schema, table.table)
-                    checksum_row = self._validate_checksum(
+                    checksum_rows = self._validate_checksum(
                         ocur,
                         pcur,
                         owner,
@@ -320,17 +359,23 @@ class OracleToPostgresSync:
                         effective_where,
                         mapping,
                     )
-                    if checksum_row:
-                        result.checksum_status = checksum_row["status"]
-                        result.checksum_source_hash = checksum_row["source_hash"]
-                        result.checksum_target_hash = checksum_row["target_hash"]
-                        result.checksum_source_rows = checksum_row["row_count_source"]
-                        result.checksum_target_rows = checksum_row["row_count_target"]
-                        if checksum_row["status"] == "MISMATCH":
+                    if checksum_rows:
+                        result.checksum_rows = checksum_rows
+                        _apply_checksum_summary(result, checksum_rows)
+                        if result.checksum_status == "MISMATCH":
                             result.status = "FAILED"
                             result.message = "checksum mismatch after load"
                             pcon.rollback()
                             return result
+                    if mode == "truncate":
+                        self._mark_table_phase(
+                            checkpoint_store,
+                            run_id,
+                            table.fqname,
+                            "table_validated",
+                            rows_attempted=rows,
+                            rows_success=rows,
+                        )
 
                     if self.config.sync.exact_count_after_load:
                         result.oracle_row_count = oracle.count_rows(ocur, owner, source_table)
@@ -345,6 +390,15 @@ class OracleToPostgresSync:
                         result.status = "SUCCESS"
 
                     pcon.commit()
+                    if mode == "truncate":
+                        self._mark_table_phase(
+                            checkpoint_store,
+                            run_id,
+                            table.fqname,
+                            "table_committed",
+                            rows_attempted=rows,
+                            rows_success=rows,
+                        )
                     self._update_watermark(
                         checkpoint_store,
                         table_cfg,
@@ -382,6 +436,63 @@ class OracleToPostgresSync:
         postgres.truncate_table(pcur, schema, table, cascade=self.config.sync.truncate_cascade)
         return self._copy_oracle_to_pg(ocur, pcur, owner, schema, table, table, mapping, where)
 
+    def _sync_truncate_staging(
+        self,
+        ocur,
+        pcur,
+        owner: str,
+        schema: str,
+        source_table: str,
+        target_table: str,
+        mapping: list[tuple[str, str | None]],
+        chunks: list[Chunk],
+        *,
+        checkpoint_store: CheckpointStore | None,
+        run_id: str,
+    ) -> int:
+        postgres.set_local_timeouts(
+            pcur,
+            lock_timeout=self.config.sync.pg_lock_timeout,
+            statement_timeout=self.config.sync.pg_statement_timeout,
+        )
+        staging_schema, staging = create_staging_like(
+            pcur,
+            schema,
+            target_table,
+            staging_schema=self.config.sync.staging_schema,
+        )
+        try:
+            rows = self._copy_chunks(
+                ocur,
+                pcur,
+                owner,
+                staging_schema,
+                source_table,
+                staging,
+                mapping,
+                chunks,
+                checkpoint_store=checkpoint_store,
+                run_id=run_id,
+                resume_successful=set(),
+            )
+            if self.config.sync.analyze_after_load:
+                postgres.analyze_table(pcur, staging_schema, staging)
+            pg_columns = [pg_col for pg_col, _ in mapping]
+            postgres.truncate_table(pcur, schema, target_table, cascade=self.config.sync.truncate_cascade)
+            postgres.insert_from_table(
+                pcur,
+                target_schema=schema,
+                target_table=target_table,
+                source_schema=staging_schema,
+                source_table=staging,
+                columns=pg_columns,
+            )
+            drop_table(pcur, staging_schema, staging)
+            return rows
+        except Exception:
+            drop_table(pcur, staging_schema, staging)
+            raise
+
     def _sync_swap(
         self,
         ocur,
@@ -397,15 +508,15 @@ class OracleToPostgresSync:
             lock_timeout=self.config.sync.pg_lock_timeout,
             statement_timeout=self.config.sync.pg_statement_timeout,
         )
-        staging = create_staging_like(pcur, schema, table)
-        rows = self._copy_oracle_to_pg(ocur, pcur, owner, schema, table, staging, mapping, where)
+        staging_schema, staging = create_staging_like(pcur, schema, table)
+        rows = self._copy_oracle_to_pg(ocur, pcur, owner, staging_schema, table, staging, mapping, where)
         if self.config.sync.exact_count_after_load:
             source_count = oracle.count_rows(ocur, owner, table)
-            staging_count = postgres.count_rows(pcur, schema, staging)
+            staging_count = postgres.count_rows(pcur, staging_schema, staging)
             if source_count != staging_count:
                 raise RuntimeError(f"staging rowcount mismatch Oracle={source_count} PG={staging_count}")
         if self.config.sync.analyze_after_load:
-            postgres.analyze_table(pcur, schema, staging)
+            postgres.analyze_table(pcur, staging_schema, staging)
         old_table = atomic_swap(pcur, schema, table)
         if not self.config.sync.keep_old_after_swap:
             drop_table(pcur, schema, old_table)
@@ -425,8 +536,8 @@ class OracleToPostgresSync:
     ) -> int:
         if not key_columns:
             raise ValueError(f"Mode upsert but key_columns is empty for {schema}.{target_table}")
-        staging = create_staging_like(pcur, schema, target_table)
-        rows = self._copy_oracle_to_pg(ocur, pcur, owner, schema, source_table, staging, mapping, where)
+        staging_schema, staging = create_staging_like(pcur, schema, target_table)
+        rows = self._copy_oracle_to_pg(ocur, pcur, owner, staging_schema, source_table, staging, mapping, where)
         pg_columns = [pg_col for pg_col, _ in mapping]
         key_set = {k.lower() for k in key_columns}
         update_columns = [c for c in pg_columns if c.lower() not in key_set]
@@ -443,13 +554,13 @@ class OracleToPostgresSync:
             "ON CONFLICT ({keys}) {}"
         ).format(
             table_ident(schema, target_table),
-            table_ident(schema, staging),
+            table_ident(staging_schema, staging),
             conflict_action,
             cols=sql.SQL(", ").join(sql.Identifier(c) for c in pg_columns),
             keys=sql.SQL(", ").join(sql.Identifier(c.lower()) for c in key_columns),
         )
         pcur.execute(insert_stmt)
-        drop_table(pcur, schema, staging)
+        drop_table(pcur, staging_schema, staging)
         return rows
 
     def _copy_oracle_to_pg(
@@ -465,7 +576,14 @@ class OracleToPostgresSync:
     ) -> int:
         rows_cursor = oracle.select_rows(ocur, owner, source_table, mapping, where=where)
         pg_columns = [pg_col for pg_col, _ in mapping]
-        return copy_rows(pcur, schema=source_schema, table=target_table, columns=pg_columns, rows=rows_cursor)
+        return copy_rows(
+            pcur,
+            schema=source_schema,
+            table=target_table,
+            columns=pg_columns,
+            rows=rows_cursor,
+            lob_chunk_size_bytes=self.config.lob_strategy.lob_chunk_size_bytes,
+        )
 
     def _copy_chunks(
         self,
@@ -530,6 +648,48 @@ class OracleToPostgresSync:
                 raise
         return total
 
+    def _truncate_resume_successful_chunks(
+        self,
+        table_name: str,
+        successful: set[str],
+        *,
+        resume: bool,
+    ) -> set[str]:
+        if not resume or not successful:
+            return successful
+        strategy = (self.config.sync.truncate_resume_strategy or "restart_table").lower()
+        if strategy not in {"restart_table", "staging"}:
+            raise ValueError(f"Unsupported truncate_resume_strategy: {strategy}")
+        self.logger.warning(
+            "Resume mode truncate untuk %s tidak akan skip partial chunks; strategy=%s reload full table.",
+            table_name,
+            strategy,
+        )
+        return set()
+
+    def _mark_table_phase(
+        self,
+        checkpoint_store: CheckpointStore | None,
+        run_id: str,
+        table_name: str,
+        phase: str,
+        *,
+        rows_attempted: int = 0,
+        rows_success: int = 0,
+    ) -> None:
+        if not checkpoint_store:
+            return
+        checkpoint_store.mark_table_phase(
+            run_id=run_id,
+            direction="oracle_to_postgres",
+            source_db=self.config.oracle.schema,
+            target_db=self.config.postgres.schema,
+            table_name=table_name,
+            phase=phase,
+            rows_attempted=rows_attempted,
+            rows_success=rows_success,
+        )
+
     def _column_mapping(
         self,
         fq_table: str,
@@ -554,11 +714,14 @@ class OracleToPostgresSync:
         table: str,
         table_cfg: TableConfig,
         where: str | None,
+        *,
+        chunk_key_override: str | None = None,
+        chunk_size_override: int | None = None,
     ) -> list[Chunk]:
-        key = (table_cfg.key_columns or table_cfg.primary_key or [])[:1]
+        key = [chunk_key_override] if chunk_key_override else (table_cfg.key_columns or table_cfg.primary_key or [])[:1]
         if not key:
             return [Chunk(table_name=split_schema_table(table_cfg.name, self.config.postgres.schema).fqname, chunk_key="full", where=where)]
-        chunk_size = max(1, int(self.config.sync.chunk_size or 50000))
+        chunk_size = max(1, int(chunk_size_override or self.config.sync.chunk_size or 50000))
         column = key[0]
         try:
             min_value, max_value = oracle.min_max(ocur, owner, table, column)
@@ -659,36 +822,64 @@ class OracleToPostgresSync:
         pg_columns_meta: list[Any],
         where: str | None,
         mapping: list[tuple[str, str | None]],
-    ) -> dict[str, Any] | None:
+    ) -> list[dict[str, Any]]:
         cfg = self.config.validation.checksum
         table_cfg = self.config.table_config(fq_table)
         if table_cfg and table_cfg.validation.checksum.enabled:
             cfg = table_cfg.validation.checksum
         if not cfg.enabled:
-            return None
+            return []
         pg_cols = checksum_columns(pg_columns_meta, configured=cfg.columns, exclude_columns=cfg.exclude_columns)
         mapped = [(pg_col, oracle_col) for pg_col, oracle_col in mapping if pg_col in pg_cols and oracle_col is not None]
         if not mapped:
-            return None
-        source_rows = list(oracle.select_rows(ocur, owner, table, mapped, where=where).fetchall())
-        target_rows = list(postgres.select_rows(pcur, schema, table, [pg_col for pg_col, _ in mapped], where=where).fetchall())
-        return checksum_result_row(
-            table_name=fq_table,
-            chunk_key="table",
-            source_hash=stable_row_hash(source_rows, [pg for pg, _ in mapped]),
-            target_hash=stable_row_hash(target_rows, [pg for pg, _ in mapped]),
-            row_count_source=len(source_rows),
-            row_count_target=len(target_rows),
-        )
+            return []
+        batch_size = int(getattr(cfg, "batch_size", 5000) or 5000)
+        mode = str(getattr(cfg, "mode", "table") or "table").lower()
+        chunks = [Chunk(table_name=fq_table, chunk_key="table", where=where)]
+        if mode == "chunk":
+            chunk_key = getattr(cfg, "chunk_key", None)
+            table_cfg_for_chunks = table_cfg or TableConfig(name=fq_table)
+            chunks = self._plan_chunks(
+                ocur,
+                owner,
+                table,
+                table_cfg_for_chunks,
+                where,
+                chunk_key_override=chunk_key,
+            )
+        elif mode == "sample":
+            self.logger.warning("checksum.mode=sample uses streaming table checksum until DB-specific sampling is configured")
+        elif mode != "table":
+            raise ValueError(f"Unsupported checksum mode: {mode}")
+        rows: list[dict[str, Any]] = []
+        for chunk in chunks:
+            source_cursor = oracle.select_rows(ocur, owner, table, mapped, where=_chunk_where(chunk))
+            target_cursor = postgres.select_rows(pcur, schema, table, [pg_col for pg_col, _ in mapped], where=_chunk_where(chunk))
+            source_hash, source_count = stable_cursor_hash(source_cursor, [pg for pg, _ in mapped], batch_size=batch_size)
+            target_hash, target_count = stable_cursor_hash(target_cursor, [pg for pg, _ in mapped], batch_size=batch_size)
+            rows.append(
+                checksum_result_row(
+                    table_name=fq_table,
+                    chunk_key=chunk.chunk_key,
+                    source_hash=source_hash,
+                    target_hash=target_hash,
+                    row_count_source=source_count,
+                    row_count_target=target_count,
+                )
+            )
+        return rows
 
     @staticmethod
     def _apply_lob_summary(result: SyncResult, summary: dict[str, Any]) -> None:
-        result.lob_columns_detected = ";".join(summary.get("lob_columns_detected") or [])
-        result.lob_strategy_applied = ";".join(
-            f"{k}:{v}" for k, v in (summary.get("lob_strategy_applied") or {}).items()
-        )
-        result.lob_columns_skipped = ";".join(summary.get("lob_columns_skipped") or [])
-        result.lob_columns_nullified = ";".join(summary.get("lob_columns_nullified") or [])
+        fields = lob_summary_to_fields(summary)
+        result.lob_columns_detected = fields["lob_columns_detected"]
+        result.lob_columns_synced = fields["lob_columns_synced"]
+        result.lob_strategy_applied = fields["lob_strategy_applied"]
+        result.lob_columns_skipped = fields["lob_columns_skipped"]
+        result.lob_columns_nullified = fields["lob_columns_nullified"]
+        result.lob_type = fields["lob_type"]
+        result.lob_target_type = fields["lob_target_type"]
+        result.lob_validation_mode = fields["lob_validation_mode"]
 
     def _swap_size_estimate(self, pcur, schema: str, table: str) -> int | None:
         try:
@@ -770,3 +961,15 @@ def _combine_where(left: str | None, right: str | None) -> str | None:
 
 def _chunk_where(chunk: Chunk) -> str | None:
     return chunk.where
+
+
+def _apply_checksum_summary(result: SyncResult, rows: list[dict[str, Any]]) -> None:
+    result.checksum_status = "MISMATCH" if any(row.get("status") == "MISMATCH" for row in rows) else "MATCH"
+    result.checksum_source_rows = sum(int(row.get("row_count_source") or 0) for row in rows)
+    result.checksum_target_rows = sum(int(row.get("row_count_target") or 0) for row in rows)
+    if len(rows) == 1:
+        result.checksum_source_hash = str(rows[0].get("source_hash") or "")
+        result.checksum_target_hash = str(rows[0].get("target_hash") or "")
+    else:
+        result.checksum_source_hash = f"{len(rows)} chunks"
+        result.checksum_target_hash = f"{len(rows)} chunks"

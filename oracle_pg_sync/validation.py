@@ -50,10 +50,28 @@ def stable_row_hash(rows: Iterable[Iterable[Any]], columns: list[str]) -> str:
     digest = hashlib.sha256()
     digest.update(json.dumps([col.lower() for col in columns], separators=(",", ":")).encode("utf-8"))
     for row in rows:
-        normalized = [_normalize_value(value) for value in row]
-        digest.update(b"\n")
-        digest.update(json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        _update_digest_with_row(digest, row)
     return digest.hexdigest()
+
+
+def stable_cursor_hash(cursor: Any, columns: list[str], *, batch_size: int = 5000) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    digest.update(json.dumps([col.lower() for col in columns], separators=(",", ":")).encode("utf-8"))
+    count = 0
+    while True:
+        rows = cursor.fetchmany(max(1, int(batch_size or 5000)))
+        if not rows:
+            break
+        for row in rows:
+            _update_digest_with_row(digest, row)
+            count += 1
+    return digest.hexdigest(), count
+
+
+def _update_digest_with_row(digest: Any, row: Iterable[Any]) -> None:
+    normalized = [_normalize_value(value) for value in row]
+    digest.update(b"\n")
+    digest.update(json.dumps(normalized, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
 
 def _normalize_value(value: Any) -> Any:

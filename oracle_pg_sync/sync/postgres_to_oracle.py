@@ -3,17 +3,18 @@ from __future__ import annotations
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from oracle_pg_sync.checkpoint import CheckpointStore, Chunk, new_run_id
 from oracle_pg_sync.config import AppConfig, TableConfig
 from oracle_pg_sync.db import oracle, postgres
-from oracle_pg_sync.lob import apply_lob_mapping_policy
+from oracle_pg_sync.lob import apply_lob_mapping_policy, lob_summary_to_fields
 from oracle_pg_sync.metadata.compare import compare_table_metadata, inventory_has_fatal_mismatch
 from oracle_pg_sync.metadata.oracle_metadata import fetch_table_metadata as fetch_oracle_metadata
 from oracle_pg_sync.metadata.postgres_metadata import fetch_table_metadata as fetch_pg_metadata
 from oracle_pg_sync.utils.naming import split_schema_table
+from oracle_pg_sync.validation import checksum_columns, checksum_result_row, stable_cursor_hash
 
 
 @dataclass
@@ -29,10 +30,20 @@ class ReverseSyncResult:
     message: str = ""
     elapsed_seconds: float = 0.0
     run_id: str = ""
+    checksum_status: str = ""
+    checksum_source_hash: str = ""
+    checksum_target_hash: str = ""
+    checksum_source_rows: int | None = None
+    checksum_target_rows: int | None = None
+    checksum_rows: list[dict[str, Any]] = field(default_factory=list)
     lob_columns_detected: str = ""
+    lob_columns_synced: str = ""
     lob_strategy_applied: str = ""
     lob_columns_skipped: str = ""
     lob_columns_nullified: str = ""
+    lob_type: str = ""
+    lob_target_type: str = ""
+    lob_validation_mode: str = ""
 
     def as_row(self) -> dict[str, Any]:
         return {
@@ -48,10 +59,19 @@ class ReverseSyncResult:
             "dry_run": self.dry_run,
             "message": self.message,
             "elapsed_seconds": round(self.elapsed_seconds, 3),
+            "checksum_status": self.checksum_status,
+            "checksum_source_hash": self.checksum_source_hash,
+            "checksum_target_hash": self.checksum_target_hash,
+            "checksum_source_rows": self.checksum_source_rows,
+            "checksum_target_rows": self.checksum_target_rows,
             "lob_columns_detected": self.lob_columns_detected,
+            "lob_columns_synced": self.lob_columns_synced,
             "lob_strategy_applied": self.lob_strategy_applied,
             "lob_columns_skipped": self.lob_columns_skipped,
             "lob_columns_nullified": self.lob_columns_nullified,
+            "lob_type": self.lob_type,
+            "lob_target_type": self.lob_target_type,
+            "lob_validation_mode": self.lob_validation_mode,
         }
 
 
@@ -73,7 +93,6 @@ class PostgresToOracleSync:
         incremental: bool = False,
         full_refresh: bool = False,
     ) -> list[ReverseSyncResult]:
-        del incremental, full_refresh
         run_id = run_id or new_run_id()
         if checkpoint_store:
             checkpoint_store.create_run(
@@ -93,6 +112,8 @@ class PostgresToOracleSync:
                     checkpoint_store=checkpoint_store,
                     run_id=run_id,
                     resume=resume,
+                    incremental=incremental,
+                    full_refresh=full_refresh,
                 )
                 for table in tables
             ]
@@ -112,6 +133,8 @@ class PostgresToOracleSync:
                     checkpoint_store=checkpoint_store,
                     run_id=run_id,
                     resume=resume,
+                    incremental=incremental,
+                    full_refresh=full_refresh,
                 ): table
                 for table in tables
             }
@@ -132,6 +155,8 @@ class PostgresToOracleSync:
         checkpoint_store: CheckpointStore | None = None,
         run_id: str | None = None,
         resume: bool = False,
+        incremental: bool = False,
+        full_refresh: bool = False,
     ) -> ReverseSyncResult:
         started = time.time()
         table = split_schema_table(table_name, self.config.postgres.schema)
@@ -190,7 +215,8 @@ class PostgresToOracleSync:
                         config=self.config,
                         table_cfg=table_cfg,
                         table_name=table.fqname,
-                        source_columns=pg_meta.columns,
+                        source_columns=oracle_meta.columns,
+                        policy_column_side="target",
                     )
                     self._apply_lob_summary(result, lob_summary)
                     if not mapping:
@@ -198,9 +224,22 @@ class PostgresToOracleSync:
                         result.message = "semua kolom termapping di-skip oleh lob_strategy"
                         return result
 
+                    effective_where = _combine_where(
+                        table_cfg.where,
+                        self._incremental_where(
+                            checkpoint_store,
+                            table_cfg,
+                            table.fqname,
+                            incremental=incremental,
+                            full_refresh=full_refresh,
+                        ),
+                    )
+
                     if dry_run:
                         result.status = "DRY_RUN"
                         result.message = f"akan load {len(mapping)} kolom dari PostgreSQL ke Oracle"
+                        if effective_where:
+                            result.message += f"; filter: {effective_where}"
                         return result
 
                     if checkpoint_store:
@@ -219,11 +258,11 @@ class PostgresToOracleSync:
                         checkpoint_store.start_chunk(run_id, table.fqname, "full")
 
                     if mode == "truncate":
-                        rows = self._sync_truncate(pcur, ocur, table.schema, table.table, owner, mapping, table_cfg.where)
+                        rows = self._sync_truncate(pcur, ocur, table.schema, table.table, owner, mapping, effective_where)
                     elif mode == "delete":
-                        rows = self._sync_delete(pcur, ocur, table.schema, table.table, owner, mapping, table_cfg.where)
+                        rows = self._sync_delete(pcur, ocur, table.schema, table.table, owner, mapping, effective_where)
                     elif mode == "append":
-                        rows = self._copy_pg_to_oracle(pcur, ocur, table.schema, table.table, owner, mapping, table_cfg.where)
+                        rows = self._copy_pg_to_oracle(pcur, ocur, table.schema, table.table, owner, mapping, effective_where)
                     elif mode == "upsert":
                         rows = self._sync_upsert(
                             pcur,
@@ -233,12 +272,32 @@ class PostgresToOracleSync:
                             owner,
                             mapping,
                             table_cfg.key_columns,
-                            table_cfg.where,
+                            effective_where,
                         )
                     else:
                         raise ValueError(f"Unsupported reverse sync mode: {mode}")
 
                     result.rows_loaded = rows
+                    checksum_rows = self._validate_checksum(
+                        pcur,
+                        ocur,
+                        table.schema,
+                        owner,
+                        table.table,
+                        table.fqname,
+                        pg_meta.columns,
+                        oracle_meta.columns,
+                        effective_where,
+                        mapping,
+                    )
+                    if checksum_rows:
+                        result.checksum_rows = checksum_rows
+                        _apply_checksum_summary(result, checksum_rows)
+                        if result.checksum_status == "MISMATCH":
+                            result.status = "FAILED"
+                            result.message = "checksum mismatch after reverse load"
+                            ocon.rollback()
+                            return result
                     if checkpoint_store:
                         checkpoint_store.finish_chunk(
                             run_id,
@@ -261,6 +320,16 @@ class PostgresToOracleSync:
                         result.status = "SUCCESS"
 
                     ocon.commit()
+                    self._update_watermark(
+                        checkpoint_store,
+                        table_cfg,
+                        table.fqname,
+                        pcur,
+                        table.schema,
+                        table.table,
+                        effective_where,
+                        enabled=incremental or table_cfg.incremental.enabled,
+                    )
                     return result
         except Exception as exc:
             if checkpoint_store and run_id:
@@ -378,14 +447,113 @@ class PostgresToOracleSync:
                 mapping.append((oracle_name_l, pg_candidate))
         return mapping
 
+    def _incremental_where(
+        self,
+        checkpoint_store: CheckpointStore | None,
+        table_cfg: TableConfig,
+        table_name: str,
+        *,
+        incremental: bool,
+        full_refresh: bool,
+    ) -> str | None:
+        cfg = table_cfg.incremental
+        if full_refresh or not (incremental or cfg.enabled):
+            return None
+        if not cfg.column:
+            raise ValueError(f"Incremental enabled for {table_name} but incremental.column is empty")
+        value = checkpoint_store.get_watermark(
+            direction="postgres_to_oracle",
+            table_name=table_name,
+            strategy=cfg.strategy,
+            column_name=cfg.column,
+        ) if checkpoint_store else None
+        value = value if value not in (None, "") else cfg.initial_value
+        if value in (None, ""):
+            return None
+        column = _pg_qident(cfg.column)
+        if cfg.strategy == "numeric_key":
+            return f"{column} > {value}"
+        if cfg.strategy == "updated_at":
+            return f"{column} >= TIMESTAMP '{value}' - INTERVAL '{int(cfg.overlap_minutes or 0)} minutes'"
+        raise ValueError(f"Unsupported incremental strategy: {cfg.strategy}")
+
+    def _update_watermark(
+        self,
+        checkpoint_store: CheckpointStore | None,
+        table_cfg: TableConfig,
+        table_name: str,
+        pcur,
+        schema: str,
+        table: str,
+        where: str | None,
+        *,
+        enabled: bool,
+    ) -> None:
+        if not checkpoint_store or not enabled or not table_cfg.incremental.enabled:
+            return
+        cfg = table_cfg.incremental
+        if not cfg.column:
+            return
+        value = postgres.max_value(pcur, schema, table, cfg.column.lower(), where=where)
+        if value is not None:
+            checkpoint_store.set_watermark(
+                direction="postgres_to_oracle",
+                table_name=table_name,
+                strategy=cfg.strategy,
+                column_name=cfg.column,
+                value=value,
+            )
+
+    def _validate_checksum(
+        self,
+        pcur,
+        ocur,
+        pg_schema: str,
+        oracle_owner: str,
+        table: str,
+        fq_table: str,
+        pg_columns_meta: list[Any],
+        oracle_columns_meta: list[Any],
+        where: str | None,
+        mapping: list[tuple[str, str | None]],
+    ) -> list[dict[str, Any]]:
+        cfg = self.config.validation.checksum
+        table_cfg = self.config.table_config(fq_table)
+        if table_cfg and table_cfg.validation.checksum.enabled:
+            cfg = table_cfg.validation.checksum
+        if not cfg.enabled:
+            return []
+        oracle_cols = checksum_columns(oracle_columns_meta, configured=cfg.columns, exclude_columns=cfg.exclude_columns)
+        mapped = [(oracle_col, pg_col) for oracle_col, pg_col in mapping if oracle_col in oracle_cols and pg_col is not None]
+        if not mapped:
+            return []
+        batch_size = int(getattr(cfg, "batch_size", 5000) or 5000)
+        pg_cursor = postgres.select_rows(pcur, pg_schema, table, [pg_col for _, pg_col in mapped], where=where)
+        oracle_cursor = oracle.select_rows(ocur, oracle_owner, table, [(oracle_col, oracle_col) for oracle_col, _ in mapped], where=where)
+        source_hash, source_count = stable_cursor_hash(pg_cursor, [oracle_col for oracle_col, _ in mapped], batch_size=batch_size)
+        target_hash, target_count = stable_cursor_hash(oracle_cursor, [oracle_col for oracle_col, _ in mapped], batch_size=batch_size)
+        return [
+            checksum_result_row(
+                table_name=fq_table,
+                chunk_key="table",
+                source_hash=source_hash,
+                target_hash=target_hash,
+                row_count_source=source_count,
+                row_count_target=target_count,
+            )
+        ]
+
     @staticmethod
     def _apply_lob_summary(result: ReverseSyncResult, summary: dict[str, Any]) -> None:
-        result.lob_columns_detected = ";".join(summary.get("lob_columns_detected") or [])
-        result.lob_strategy_applied = ";".join(
-            f"{k}:{v}" for k, v in (summary.get("lob_strategy_applied") or {}).items()
-        )
-        result.lob_columns_skipped = ";".join(summary.get("lob_columns_skipped") or [])
-        result.lob_columns_nullified = ";".join(summary.get("lob_columns_nullified") or [])
+        fields = lob_summary_to_fields(summary)
+        result.lob_columns_detected = fields["lob_columns_detected"]
+        result.lob_columns_synced = fields["lob_columns_synced"]
+        result.lob_strategy_applied = fields["lob_strategy_applied"]
+        result.lob_columns_skipped = fields["lob_columns_skipped"]
+        result.lob_columns_nullified = fields["lob_columns_nullified"]
+        result.lob_type = fields["lob_type"]
+        result.lob_target_type = fields["lob_target_type"]
+        result.lob_validation_mode = fields["lob_validation_mode"]
 
 
 def _clean_value(value: Any) -> Any:
@@ -398,3 +566,25 @@ def _clean_value(value: Any) -> Any:
     if isinstance(value, str):
         return value.replace("\x00", "")
     return value
+
+
+def _combine_where(left: str | None, right: str | None) -> str | None:
+    if left and right:
+        return f"({left}) AND ({right})"
+    return left or right
+
+
+def _pg_qident(name: str) -> str:
+    return '"' + name.replace('"', '""').lower() + '"'
+
+
+def _apply_checksum_summary(result: ReverseSyncResult, rows: list[dict[str, Any]]) -> None:
+    result.checksum_status = "MISMATCH" if any(row.get("status") == "MISMATCH" for row in rows) else "MATCH"
+    result.checksum_source_rows = sum(int(row.get("row_count_source") or 0) for row in rows)
+    result.checksum_target_rows = sum(int(row.get("row_count_target") or 0) for row in rows)
+    if len(rows) == 1:
+        result.checksum_source_hash = str(rows[0].get("source_hash") or "")
+        result.checksum_target_hash = str(rows[0].get("target_hash") or "")
+    else:
+        result.checksum_source_hash = f"{len(rows)} chunks"
+        result.checksum_target_hash = f"{len(rows)} chunks"

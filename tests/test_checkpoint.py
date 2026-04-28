@@ -45,6 +45,24 @@ class CheckpointTest(unittest.TestCase):
             )
             self.assertEqual(store.reset_watermark("public.sample"), 1)
 
+    def test_table_phase_checkpoint_statuses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CheckpointStore(Path(tmp) / "checkpoint.sqlite3")
+            store.create_run(run_id="run1", direction="oracle_to_postgres", source_db="ora", target_db="pg")
+
+            store.mark_table_phase(
+                run_id="run1",
+                direction="oracle_to_postgres",
+                source_db="ora",
+                target_db="pg",
+                table_name="public.sample",
+                phase="table_committed",
+                rows_attempted=10,
+                rows_success=10,
+            )
+
+            self.assertEqual(store.chunk_status("run1", "public.sample", "table_committed"), "success")
+
 
 if __name__ == "__main__":
     unittest.main()

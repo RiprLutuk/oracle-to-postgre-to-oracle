@@ -24,6 +24,7 @@ dev = [
 
 [project.scripts]
 oracle-pg-sync-audit = "oracle_pg_sync.cli:main"
+ops = "oracle_pg_sync.ops:main"
 
 [tool.setuptools.packages.find]
 include = ["oracle_pg_sync*"]

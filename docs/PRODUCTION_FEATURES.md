@@ -82,7 +82,8 @@ Config global atau table-level:
 validation:
   checksum:
     enabled: true
-    mode: table
+    mode: chunk
+    batch_size: 5000
     columns: auto
     exclude_columns:
       - BLOB_PAYLOAD
@@ -93,15 +94,33 @@ Checksum memakai hash stabil dari kolom comparable. Tipe LOB dan JSON yang tidak
 
 Jika checksum mismatch setelah load, table dianggap gagal dan watermark tidak diupdate.
 
+## Safe Truncate Resume
+
+Mode `truncate` tidak pernah resume dengan skip partial chunk lama. Jika run sebelumnya gagal, resume memakai:
+
+```yaml
+sync:
+  truncate_resume_strategy: staging   # staging atau restart_table
+  staging_schema: null
+```
+
+`staging` meload data penuh ke staging table dulu, lalu target baru di-`TRUNCATE` dan diisi ulang setelah staging selesai. `restart_table` reload target dari awal. Checkpoint table phase mencatat `table_loaded`, `table_validated`, dan `table_committed`; watermark baru diupdate setelah commit.
+
 ## LOB Strategy
 
-Default sync untuk LOB adalah `error`: fail early sebelum data diubah. Ini disengaja agar BLOB/CLOB besar tidak tersalin tanpa keputusan DBA.
+Default sync untuk LOB adalah `error`: fail early sebelum data diubah. Ini disengaja agar BLOB/CLOB/NCLOB/LONG besar tidak tersalin tanpa keputusan DBA.
+
+Tipe Oracle yang didukung:
+
+- `BLOB` -> PostgreSQL `bytea`
+- `CLOB` / `NCLOB` / `LONG` -> PostgreSQL `text`
+- `LONG RAW` -> PostgreSQL `bytea` jika driver dan schema target mendukungnya
 
 Pilihan:
 
 - `skip`: kolom LOB tidak ikut select/insert.
 - `null`: kolom target tetap diisi, tetapi value dibuat `NULL`.
-- `stream`: copy LOB seperti biasa dengan pembacaan driver.
+- `stream` / `include`: copy LOB content dengan pembacaan chunk per value.
 - `error`: fail early.
 
 Contoh DBA use case: Oracle `SAMPLE_BLOB_TABLE.BLOB_PAYLOAD` disync sebagai `NULL` dan dikeluarkan dari checksum.
@@ -121,11 +140,14 @@ tables:
       overlap_minutes: 10
     lob_strategy:
       columns:
-        BLOB_PAYLOAD: null
+        BLOB_PAYLOAD:
+          strategy: stream
+          target_type: bytea
+          validation: size_hash
     validation:
       checksum:
         enabled: true
-        mode: batch
+        mode: chunk
         exclude_columns:
           - BLOB_PAYLOAD
 ```
@@ -133,9 +155,15 @@ tables:
 Report `sync_result.csv` berisi kolom:
 
 - `lob_columns_detected`
+- `lob_columns_synced`
 - `lob_strategy_applied`
 - `lob_columns_skipped`
 - `lob_columns_nullified`
+- `lob_type`
+- `lob_target_type`
+- `lob_validation_mode`
+
+Nilai LOB mentah tidak pernah ditulis ke log, manifest, CSV, Excel, atau HTML report.
 
 ## Run Manifest
 

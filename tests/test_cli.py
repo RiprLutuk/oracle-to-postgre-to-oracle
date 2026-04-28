@@ -2,8 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from oracle_pg_sync.cli import _apply_where_override, _resolve_tables, build_parser
+from oracle_pg_sync.cli import _apply_lob_override, _apply_where_override, _resolve_tables, build_parser
 from oracle_pg_sync.config import AppConfig, OracleConfig, PostgresConfig, TableConfig
+from oracle_pg_sync.ops import _expand_bare_lob_flag
 
 
 class CliTest(unittest.TestCase):
@@ -103,6 +104,12 @@ tables:
 
         self.assertEqual(args.where, "updated_at >= NOW() - INTERVAL '5 minutes'")
 
+    def test_sync_accepts_go_and_lob_override(self):
+        args = build_parser().parse_args(["sync", "--go", "--lob", "stream"])
+
+        self.assertTrue(args.execute)
+        self.assertEqual(args.lob, "stream")
+
     def test_where_override_updates_table_config(self):
         config = AppConfig(
             oracle=OracleConfig(),
@@ -113,6 +120,16 @@ tables:
         _apply_where_override(config, ["sample_customer"], "updated_at >= '2026-01-01'")
 
         self.assertEqual(config.tables[0].where, "updated_at >= '2026-01-01'")
+
+    def test_lob_override_updates_default_strategy(self):
+        config = AppConfig(oracle=OracleConfig(), postgres=PostgresConfig())
+
+        _apply_lob_override(config, "include")
+
+        self.assertEqual(config.lob_strategy.default, "stream")
+
+    def test_ops_validate_bare_lob_defaults_to_stream(self):
+        self.assertEqual(_expand_bare_lob_flag(["--lob", "--tables", "sample"]), ["--lob", "stream", "--tables", "sample"])
 
 
 if __name__ == "__main__":

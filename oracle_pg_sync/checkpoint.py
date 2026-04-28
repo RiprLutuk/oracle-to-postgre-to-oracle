@@ -196,6 +196,39 @@ class CheckpointStore:
                 (status, rows_attempted, rows_success, error_message, utc_now(), run_id, table_name, chunk_key),
             )
 
+    def mark_table_phase(
+        self,
+        *,
+        run_id: str,
+        direction: str,
+        source_db: str,
+        target_db: str,
+        table_name: str,
+        phase: str,
+        status: str = "success",
+        rows_attempted: int = 0,
+        rows_success: int = 0,
+        error_message: str = "",
+    ) -> None:
+        chunk = Chunk(table_name=table_name, chunk_key=phase)
+        self.ensure_chunk(
+            run_id=run_id,
+            direction=direction,
+            source_db=source_db,
+            target_db=target_db,
+            chunk=chunk,
+        )
+        self.start_chunk(run_id, table_name, phase)
+        self.finish_chunk(
+            run_id,
+            table_name,
+            phase,
+            status=status,
+            rows_attempted=rows_attempted,
+            rows_success=rows_success,
+            error_message=error_message,
+        )
+
     def successful_chunks(self, run_id: str, table_name: str) -> set[str]:
         with self.connect() as con:
             rows = con.execute(

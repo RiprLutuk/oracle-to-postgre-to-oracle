@@ -1,6 +1,7 @@
 import unittest
 import sys
 import types
+import logging
 
 if "psycopg" not in sys.modules:
     psycopg_stub = types.ModuleType("psycopg")
@@ -62,6 +63,25 @@ class OracleToPostgresSyncTest(unittest.TestCase):
         message = sync._dry_run_message("public.sample_customer", "swap", 3, 1024**3)
 
         self.assertIn("2.5 GiB", message)
+
+    def test_truncate_resume_never_skips_successful_chunks(self):
+        sync = OracleToPostgresSync(
+            AppConfig(
+                oracle=OracleConfig(schema="APP"),
+                postgres=PostgresConfig(schema="public"),
+                sync=SyncConfig(truncate_resume_strategy="restart_table"),
+            ),
+            logger=logging.getLogger("test_truncate_resume"),
+        )
+        sync.logger.disabled = True
+
+        successful = sync._truncate_resume_successful_chunks(
+            "public.sample_customer",
+            {"id:1:10"},
+            resume=True,
+        )
+
+        self.assertEqual(successful, set())
 
 
 if __name__ == "__main__":

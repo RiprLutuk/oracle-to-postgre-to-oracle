@@ -1,4 +1,13 @@
 import unittest
+import sys
+import types
+
+if "oracledb" not in sys.modules:
+    oracledb_stub = types.ModuleType("oracledb")
+    oracledb_stub.connect = lambda *args, **kwargs: None
+    oracledb_stub.init_oracle_client = lambda *args, **kwargs: None
+    oracledb_stub.makedsn = lambda host, port, service_name=None, sid=None: "oracle-dsn"
+    sys.modules["oracledb"] = oracledb_stub
 
 from oracle_pg_sync.db import oracle
 

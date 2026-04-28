@@ -145,8 +145,29 @@ def sanitize_connection_text(value: str) -> str:
 
 
 def summarize_lob_rows(rows: list[dict]) -> dict[str, Any]:
+    detected = _split_lob_field(rows, "lob_columns_detected")
+    synced = _split_lob_field(rows, "lob_columns_synced")
     return {
-        "lob_columns_detected": sum(1 for row in rows if row.get("lob_columns_detected")),
-        "lob_columns_skipped": sum(1 for row in rows if row.get("lob_columns_skipped")),
-        "lob_columns_nullified": sum(1 for row in rows if row.get("lob_columns_nullified")),
+        "lob_columns_detected": len(detected),
+        "lob_columns_synced": len(synced),
+        "lob_columns_skipped": len(_split_lob_field(rows, "lob_columns_skipped")),
+        "lob_columns_nullified": len(_split_lob_field(rows, "lob_columns_nullified")),
+        "lob_types": sorted(_split_map_values(rows, "lob_type")),
+        "target_types": sorted(_split_map_values(rows, "lob_target_type")),
+        "validation_modes": sorted(_split_map_values(rows, "lob_validation_mode")),
     }
+
+
+def _split_lob_field(rows: list[dict], field: str) -> list[str]:
+    values: list[str] = []
+    for row in rows:
+        values.extend(item for item in str(row.get(field) or "").split(";") if item)
+    return values
+
+
+def _split_map_values(rows: list[dict], field: str) -> set[str]:
+    values: set[str] = set()
+    for item in _split_lob_field(rows, field):
+        if ":" in item:
+            values.add(item.split(":", 1)[1])
+    return values

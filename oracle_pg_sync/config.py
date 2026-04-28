@@ -78,6 +78,8 @@ class ChecksumConfig:
     mode: str = "table"
     columns: str | list[str] = "auto"
     exclude_columns: list[str] = field(default_factory=list)
+    batch_size: int = 5000
+    chunk_key: str | None = None
     sample_percent: float = 1.0
 
 
@@ -87,9 +89,35 @@ class ValidationConfig:
 
 
 @dataclass
+class LobColumnConfig:
+    strategy: str = "error"
+    target_type: str | None = None
+    validation: str | None = None
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, str):
+            return self.strategy == other
+        if isinstance(other, LobColumnConfig):
+            return (
+                self.strategy == other.strategy
+                and self.target_type == other.target_type
+                and self.validation == other.validation
+            )
+        return False
+
+
+@dataclass
 class LobStrategyConfig:
     default: str | None = None
-    columns: dict[str, str] = field(default_factory=dict)
+    columns: dict[str, LobColumnConfig] = field(default_factory=dict)
+    stream_batch_size: int = 100
+    lob_chunk_size_bytes: int = 1024 * 1024
+    validation: dict[str, Any] = field(default_factory=dict)
+    warn_on_lob_larger_than_mb: int | None = 50
+    fail_on_lob_larger_than_mb: int | None = None
+
+    def __post_init__(self) -> None:
+        self.columns = {str(key): _lob_column_config_from_raw(value) for key, value in self.columns.items()}
 
 
 @dataclass
@@ -140,6 +168,8 @@ class SyncConfig:
     pg_lock_timeout: str = "5s"
     pg_statement_timeout: str = "0"
     checkpoint_dir: Path = Path("reports/checkpoints/checkpoint.sqlite3")
+    truncate_resume_strategy: str = "restart_table"
+    staging_schema: str | None = None
 
 
 @dataclass
@@ -154,6 +184,7 @@ class AppConfig:
     sync: SyncConfig = field(default_factory=SyncConfig)
     reports: ReportsConfig = field(default_factory=ReportsConfig)
     tables: list[TableConfig] = field(default_factory=list)
+    tables_file: Path | None = None
     rename_columns: dict[str, dict[str, str]] = field(default_factory=dict)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     lob_strategy: LobStrategyConfig = field(default_factory=lambda: LobStrategyConfig(default="error"))
@@ -232,7 +263,8 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     sync = SyncConfig(**sync_raw)
     reports_raw = raw.get("reports") or {}
     reports = ReportsConfig(output_dir=Path(reports_raw.get("output_dir", "reports")))
-    tables = [_table_config_from_raw(t) for t in raw.get("tables", [])]
+    tables_file = Path(raw["tables_file"]) if raw.get("tables_file") else None
+    tables = _load_tables_config(raw, config_path, tables_file)
     rename_columns = {
         str(table).lower(): {str(k).lower(): str(v).lower() for k, v in mapping.items()}
         for table, mapping in (raw.get("rename_columns") or {}).items()
@@ -243,10 +275,29 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         sync=sync,
         reports=reports,
         tables=tables,
+        tables_file=tables_file,
         rename_columns=rename_columns,
         validation=_validation_config_from_raw(raw.get("validation") or {}),
         lob_strategy=_lob_strategy_from_raw(raw.get("lob_strategy") or {}, default="error"),
     )
+
+
+def _load_tables_config(raw: dict[str, Any], config_path: Path, tables_file: Path | None) -> list[TableConfig]:
+    inline_tables = raw.get("tables") or []
+    if inline_tables and tables_file:
+        raise ValueError("Use either config.tables or tables_file, not both. Keep table lists in one place.")
+    if inline_tables:
+        return [_table_config_from_raw(t) for t in inline_tables]
+    if not tables_file:
+        return []
+    path = tables_file
+    if not path.is_absolute():
+        path = config_path.parent / path
+    table_raw = _load_raw_config(path)
+    rows = table_raw.get("tables") if isinstance(table_raw, dict) else table_raw
+    if not isinstance(rows, list):
+        raise ValueError(f"tables_file must contain a list or a 'tables' list: {path}")
+    return [_table_config_from_raw(t) for t in rows]
 
 
 def _table_config_from_raw(raw: Any) -> TableConfig:
@@ -271,10 +322,30 @@ def _validation_config_from_raw(raw: dict[str, Any]) -> ValidationConfig:
 
 def _lob_strategy_from_raw(raw: dict[str, Any], *, default: str | None) -> LobStrategyConfig:
     columns = {
-        str(key): ("null" if value is None else str(value))
+        str(key): _lob_column_config_from_raw(value)
         for key, value in (raw.get("columns") or {}).items()
     }
-    return LobStrategyConfig(default=raw.get("default", default), columns=columns)
+    return LobStrategyConfig(
+        default=raw.get("default", default),
+        columns=columns,
+        stream_batch_size=int(raw.get("stream_batch_size", 100) or 100),
+        lob_chunk_size_bytes=int(raw.get("lob_chunk_size_bytes", 1024 * 1024) or 1024 * 1024),
+        validation=dict(raw.get("validation") or {}),
+        warn_on_lob_larger_than_mb=raw.get("warn_on_lob_larger_than_mb", 50),
+        fail_on_lob_larger_than_mb=raw.get("fail_on_lob_larger_than_mb"),
+    )
+
+
+def _lob_column_config_from_raw(value: Any) -> LobColumnConfig:
+    if isinstance(value, LobColumnConfig):
+        return value
+    if isinstance(value, dict):
+        return LobColumnConfig(
+            strategy=str(value.get("strategy", "error")).lower(),
+            target_type=str(value["target_type"]).lower() if value.get("target_type") else None,
+            validation=str(value["validation"]).lower() if value.get("validation") else None,
+        )
+    return LobColumnConfig(strategy="null" if value is None else str(value).lower())
 
 
 def mask_secret(value: str | None) -> str:
