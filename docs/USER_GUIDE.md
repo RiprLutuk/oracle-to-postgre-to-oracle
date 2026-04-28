@@ -216,6 +216,15 @@ python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgre
 python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables-file configs/tables.yaml --limit 10
 ```
 
+`configs/tables.yaml` boleh dibuat simple:
+
+```yaml
+tables:
+  - public.address
+  - public.housemaster
+  - public.a_hp_house_info
+```
+
 Reverse sync PostgreSQL ke Oracle juga dry-run secara default:
 
 ```bash
@@ -223,10 +232,10 @@ python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracl
 ```
 
 Untuk job incremental manual dari PostgreSQL ke Oracle tanpa memasukkan filter ke `config.yaml`,
-pakai `--where` pada satu table per command:
+pakai runtime override pada satu table per command:
 
 ```bash
-python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables sample_customer --mode upsert --where "updated_at >= NOW() - INTERVAL '5 minutes'"
+ops sync --config config.yaml --direction postgres-to-oracle --tables public.address --mode upsert --key-columns address_id --incremental-column last_update --where "last_update >= CURRENT_TIMESTAMP - INTERVAL '5 minutes'" --incremental --go
 ```
 
 Lihat hasilnya di:

@@ -58,6 +58,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--where",
         help="Override WHERE filter for this sync run. Intended for one-table jobs, for example cron upsert windows.",
     )
+    sync.add_argument("--key-columns", nargs="+", help="Override key columns for one-table upsert jobs")
+    _add_incremental_override_args(sync)
     sync.add_argument("--execute", "--go", dest="execute", action="store_true", help="Benar-benar eksekusi perubahan data")
     sync.add_argument("--lob", choices=["error", "skip", "null", "stream", "include"], help="Override default LOB strategy")
     sync.add_argument("--force", action="store_true", help="Tetap sync walaupun struktur mismatch")
@@ -105,6 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--where",
         help="Override WHERE filter for the sync step. Intended for one-table jobs.",
     )
+    all_cmd.add_argument("--key-columns", nargs="+", help="Override key columns for one-table upsert jobs")
+    _add_incremental_override_args(all_cmd)
     all_cmd.add_argument("--execute", "--go", dest="execute", action="store_true", help="Benar-benar eksekusi perubahan data")
     all_cmd.add_argument("--lob", choices=["error", "skip", "null", "stream", "include"], help="Override default LOB strategy")
     all_cmd.add_argument("--force", action="store_true", help="Tetap sync walaupun struktur mismatch")
@@ -135,6 +139,18 @@ def _add_production_sync_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--lock-file", default="reports/sync.lock", help="Lock file path for scheduled jobs")
     parser.add_argument("--no-lock", action="store_true", help="Disable lock file protection")
     parser.add_argument("--log-rotate-bytes", type=int, default=10 * 1024 * 1024, help="Rotate reports/sync.log above this size")
+
+
+def _add_incremental_override_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--incremental-column", help="Enable incremental override using this source column")
+    parser.add_argument(
+        "--incremental-strategy",
+        choices=["updated_at", "numeric_key"],
+        default=argparse.SUPPRESS,
+        help="Incremental override strategy. Default: updated_at",
+    )
+    parser.add_argument("--initial-value", help="Initial watermark value when no stored watermark exists")
+    parser.add_argument("--overlap-minutes", type=int, default=argparse.SUPPRESS, help="Updated-at overlap minutes")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -188,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not tables and args.command not in {"report", "audit-objects"}:
         raise SystemExit("Tidak ada table target. Isi config.tables atau pakai --tables.")
-    _apply_where_override(config, tables, getattr(args, "where", None))
+    _apply_runtime_table_overrides(args, config, tables)
 
     if args.command == "audit":
         from oracle_pg_sync.reports import write_audit_reports
@@ -653,14 +669,42 @@ def _resolve_tables(
 def _apply_where_override(config: AppConfig, tables: list[str], where: str | None) -> None:
     if not where:
         return
+    table_cfg = _single_table_config(config, tables, "--where")
+    table_cfg.where = where
+
+
+def _apply_runtime_table_overrides(args: argparse.Namespace, config: AppConfig, tables: list[str]) -> None:
+    _apply_where_override(config, tables, getattr(args, "where", None))
+    key_columns = getattr(args, "key_columns", None)
+    incremental_column = getattr(args, "incremental_column", None)
+    if not key_columns and not incremental_column:
+        return
+    table_cfg = _single_table_config(
+        config,
+        tables,
+        "--key-columns/--incremental-column",
+    )
+    if key_columns:
+        table_cfg.key_columns = [str(column).lower() for column in key_columns]
+    if incremental_column:
+        table_cfg.incremental.enabled = True
+        table_cfg.incremental.column = str(incremental_column).lower()
+        table_cfg.incremental.strategy = getattr(args, "incremental_strategy", "updated_at")
+        if getattr(args, "initial_value", None) is not None:
+            table_cfg.incremental.initial_value = args.initial_value
+        if getattr(args, "overlap_minutes", None) is not None:
+            table_cfg.incremental.overlap_minutes = int(args.overlap_minutes)
+
+
+def _single_table_config(config: AppConfig, tables: list[str], flag_name: str) -> TableConfig:
     if len(tables) != 1:
-        raise SystemExit("--where hanya boleh dipakai untuk satu table per command.")
+        raise SystemExit(f"{flag_name} hanya boleh dipakai untuk satu table per command.")
     table_name = tables[0]
     table_cfg = config.table_config(table_name)
     if table_cfg is None:
         table_cfg = TableConfig(name=table_name)
         config.tables.append(table_cfg)
-    table_cfg.where = where
+    return table_cfg
 
 
 def _apply_lob_override(config: AppConfig, strategy: str | None) -> None:

@@ -8,4 +8,7 @@ CONFIG_PATH=/home/app/oracle-pg-sync-audit/config.yaml
 15 1 * * * cd /home/app/oracle-pg-sync-audit && jobs/daily.sh
 
 # Incremental upsert every five minutes.
-*/5 * * * * cd /home/app/oracle-pg-sync-audit && jobs/every_5min.sh
+*/5 * * * * cd /home/app/oracle-pg-sync-audit && jobs/every_5min.sh --direction postgres-to-oracle --tables public.address --key-columns address_id --incremental-column last_update
+
+# Add one line per reverse table when each table has different key/filter rules.
+# */5 * * * * cd /home/app/oracle-pg-sync-audit && jobs/every_5min.sh --direction postgres-to-oracle --tables public.housemaster --key-columns site_id --incremental-column last_update

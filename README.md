@@ -77,7 +77,16 @@ Main config menunjuk table list terpisah:
 tables_file: configs/tables.yaml
 ```
 
-Gunakan `configs/tables.example.yaml` sebagai template untuk `where`, `key_columns`, incremental, checksum, dan LOB strategy.
+Isi `configs/tables.yaml` cukup daftar table supaya mudah dibaca:
+
+```yaml
+tables:
+  - public.address
+  - public.housemaster
+  - public.a_hp_house_info
+```
+
+Detail run yang berubah-ubah seperti `where`, `key_columns`, dan incremental column lebih aman ditaruh di command/job script.
 
 Rename column Oracle ke PostgreSQL:
 
@@ -115,6 +124,7 @@ Sync PostgreSQL ke Oracle dry-run:
 
 ```bash
 python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables sample_customer --mode truncate
+python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables public.address --mode upsert --key-columns address_id --incremental-column last_update --incremental
 ```
 
 Eksekusi sync sungguhan:
@@ -122,6 +132,7 @@ Eksekusi sync sungguhan:
 ```bash
 python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables sample_customer --execute
 python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables sample_customer --mode truncate --execute
+ops sync --go --direction postgres-to-oracle --tables public.address --mode upsert --key-columns address_id --incremental-column last_update --where "last_update >= CURRENT_TIMESTAMP - INTERVAL '5 minutes'" --incremental
 ```
 
 Checkpoint/resume dan watermark:
@@ -209,6 +220,7 @@ Central Excel `report.xlsx` berisi sheet:
 - `delete`: khusus PostgreSQL ke Oracle, `DELETE` target lalu insert ulang dalam transaction.
 
 Oracle ke PostgreSQL memakai PostgreSQL `COPY FROM STDIN`. PostgreSQL ke Oracle memakai batch `executemany` dan Oracle `MERGE` untuk upsert.
+Untuk reverse upsert, `key_columns` bisa berasal dari config atau command `--key-columns`.
 
 ## Safety Production
 

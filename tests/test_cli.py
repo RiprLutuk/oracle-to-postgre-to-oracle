@@ -4,7 +4,14 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from oracle_pg_sync.cli import _apply_lob_override, _apply_profile, _apply_where_override, _resolve_tables, build_parser
+from oracle_pg_sync.cli import (
+    _apply_lob_override,
+    _apply_profile,
+    _apply_runtime_table_overrides,
+    _apply_where_override,
+    _resolve_tables,
+    build_parser,
+)
 from oracle_pg_sync.config import AppConfig, OracleConfig, PostgresConfig, TableConfig
 from oracle_pg_sync.ops import _expand_bare_lob_flag, main as ops_main
 
@@ -106,6 +113,32 @@ tables:
 
         self.assertEqual(args.where, "updated_at >= NOW() - INTERVAL '5 minutes'")
 
+    def test_sync_accepts_key_and_incremental_overrides(self):
+        args = build_parser().parse_args(
+            [
+                "sync",
+                "--direction",
+                "postgres-to-oracle",
+                "--tables",
+                "public.address",
+                "--mode",
+                "upsert",
+                "--key-columns",
+                "address_id",
+                "--incremental-column",
+                "last_update",
+                "--initial-value",
+                "2026-01-01T00:00:00",
+                "--overlap-minutes",
+                "10",
+            ]
+        )
+
+        self.assertEqual(args.key_columns, ["address_id"])
+        self.assertEqual(args.incremental_column, "last_update")
+        self.assertEqual(args.initial_value, "2026-01-01T00:00:00")
+        self.assertEqual(args.overlap_minutes, 10)
+
     def test_sync_accepts_go_and_lob_override(self):
         args = build_parser().parse_args(["sync", "--go", "--lob", "stream"])
 
@@ -136,6 +169,38 @@ tables:
         _apply_where_override(config, ["sample_customer"], "updated_at >= '2026-01-01'")
 
         self.assertEqual(config.tables[0].where, "updated_at >= '2026-01-01'")
+
+    def test_runtime_overrides_create_reverse_table_details_from_simple_table_list(self):
+        config = AppConfig(
+            oracle=OracleConfig(),
+            postgres=PostgresConfig(),
+            tables=[TableConfig(name="public.address")],
+        )
+        args = build_parser().parse_args(
+            [
+                "sync",
+                "--direction",
+                "postgres-to-oracle",
+                "--tables",
+                "public.address",
+                "--mode",
+                "upsert",
+                "--key-columns",
+                "address_id",
+                "--incremental-column",
+                "last_update",
+                "--where",
+                "last_update >= CURRENT_DATE",
+            ]
+        )
+
+        _apply_runtime_table_overrides(args, config, ["public.address"])
+
+        table_cfg = config.table_config("public.address")
+        self.assertEqual(table_cfg.key_columns, ["address_id"])
+        self.assertEqual(table_cfg.where, "last_update >= CURRENT_DATE")
+        self.assertTrue(table_cfg.incremental.enabled)
+        self.assertEqual(table_cfg.incremental.column, "last_update")
 
     def test_lob_override_updates_default_strategy(self):
         config = AppConfig(oracle=OracleConfig(), postgres=PostgresConfig())

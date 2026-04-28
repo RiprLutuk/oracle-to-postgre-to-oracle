@@ -246,9 +246,31 @@ sync:
   checkpoint_dir: reports/checkpoints/checkpoint.sqlite3
 ```
 
+## Table List dan Runtime Override
+
+Untuk production yang mudah dibaca, table list bisa dibuat simple:
+
+```yaml
+tables_file: configs/tables.yaml
+```
+
+```yaml
+# configs/tables.yaml
+tables:
+  - public.address
+  - public.housemaster
+  - public.a_hp_house_info
+```
+
+Detail yang berubah per job, terutama PostgreSQL ke Oracle, bisa diisi di command:
+
+```bash
+ops sync --direction postgres-to-oracle --tables public.address --mode upsert --key-columns address_id --incremental-column last_update --where "last_update >= CURRENT_TIMESTAMP - INTERVAL '5 minutes'" --incremental --go
+```
+
 ## Incremental, Checksum, dan LOB
 
-Table-level incremental:
+Table-level incremental tetap didukung jika ingin disimpan di YAML:
 
 ```yaml
 tables:
@@ -279,7 +301,7 @@ File contoh table list ada di:
 configs/tables.example.yaml
 ```
 
-Contoh itu mencakup `where`, `key_columns`, `incremental`, checksum chunk, dan `lob_strategy`.
+Contoh default dibuat simple. Field lanjutan seperti `where`, `key_columns`, `incremental`, checksum chunk, dan `lob_strategy` tetap valid jika memang ingin disimpan di YAML.
 
 Checksum validation:
 
@@ -408,12 +430,14 @@ tables:
 - Wajib untuk `upsert`.
 - Harus sesuai unique index/constraint di PostgreSQL.
 - Untuk PostgreSQL ke Oracle, key dipakai oleh Oracle `MERGE`.
+- Bisa diisi runtime dengan `--key-columns col1 col2`.
 
 `where`
 
 - Filter query Oracle.
 - Ditambahkan langsung setelah `WHERE`.
 - Pastikan aman dan valid untuk Oracle SQL.
+- Bisa diisi runtime dengan `--where`, hanya untuk satu table per command.
 
 ## Contoh Config Development
 
