@@ -1,17 +1,28 @@
 import unittest
+import sys
+import types
 
-try:
-    import psycopg  # noqa: F401
-except ModuleNotFoundError:
-    psycopg = None
+if "psycopg" not in sys.modules:
+    psycopg_stub = types.ModuleType("psycopg")
+    psycopg_stub.connect = lambda *args, **kwargs: None
+    psycopg_stub.sql = types.SimpleNamespace(
+        SQL=lambda value: value,
+        Identifier=lambda value: value,
+        Literal=lambda value: value,
+    )
+    sys.modules["psycopg"] = psycopg_stub
+
+if "oracledb" not in sys.modules:
+    oracledb_stub = types.ModuleType("oracledb")
+    oracledb_stub.connect = lambda *args, **kwargs: None
+    oracledb_stub.init_oracle_client = lambda *args, **kwargs: None
+    oracledb_stub.makedsn = lambda host, port, service_name=None, sid=None: "oracle-dsn"
+    sys.modules["oracledb"] = oracledb_stub
 
 from oracle_pg_sync.config import AppConfig, OracleConfig, PostgresConfig, SyncConfig
-
-if psycopg is not None:
-    from oracle_pg_sync.sync.oracle_to_postgres import OracleToPostgresSync
+from oracle_pg_sync.sync.oracle_to_postgres import OracleToPostgresSync
 
 
-@unittest.skipIf(psycopg is None, "psycopg is not installed")
 class OracleToPostgresSyncTest(unittest.TestCase):
     def test_swap_execute_is_guarded_by_default(self):
         sync = OracleToPostgresSync(
