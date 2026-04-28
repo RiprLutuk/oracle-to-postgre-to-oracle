@@ -39,9 +39,23 @@ sync:
   copy_null: ""
   pg_lock_timeout: 5s
   pg_statement_timeout: "0"
+  checkpoint_dir: reports/checkpoints/checkpoint.sqlite3
 
 reports:
   output_dir: reports
+
+validation:
+  checksum:
+    enabled: false
+    mode: table
+    columns: auto
+    exclude_columns: []
+    sample_percent: 1
+
+lob_strategy:
+  # Sync default is intentionally safe: fail if a LOB is detected unless a table/column overrides it.
+  default: error
+  columns: {}
 
 rename_columns:
   public.sample_customer:
@@ -55,6 +69,19 @@ tables:
     directions:
       - oracle-to-postgres
     key_columns: [customer_id]
+    incremental:
+      enabled: true
+      strategy: updated_at
+      column: updated_at
+      initial_value: null
+      overlap_minutes: 5
+      delete_detection: false
+    validation:
+      checksum:
+        enabled: true
+        mode: batch
+        columns: auto
+        exclude_columns: []
 
   - name: public.sample_order
     oracle_to_postgres_mode: truncate
@@ -69,3 +96,29 @@ tables:
     directions:
       - oracle-to-postgres
     key_columns: [audit_id]
+    incremental:
+      enabled: true
+      strategy: numeric_key
+      column: AUDIT_ID
+      initial_value: 0
+
+  - source_schema: SAMPLE_APP
+    source_table: SAMPLE_BLOB_TABLE
+    target_schema: public
+    target_table: sample_blob_table
+    primary_key:
+      - record_id
+    incremental:
+      enabled: true
+      strategy: updated_at
+      column: updated_at
+      overlap_minutes: 10
+    lob_strategy:
+      columns:
+        BLOB_PAYLOAD: null
+    validation:
+      checksum:
+        enabled: true
+        mode: batch
+        exclude_columns:
+          - BLOB_PAYLOAD

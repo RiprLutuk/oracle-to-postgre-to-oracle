@@ -29,6 +29,18 @@ sync:
 tables:
   - name: public.sample_customer
     mode: truncate
+    incremental:
+      enabled: true
+      strategy: updated_at
+      column: updated_at
+    lob_strategy:
+      columns:
+        BLOB_PAYLOAD: null
+    validation:
+      checksum:
+        enabled: true
+        exclude_columns:
+          - BLOB_PAYLOAD
 """,
                 encoding="utf-8",
             )
@@ -40,6 +52,11 @@ tables:
         self.assertFalse(config.sync.allow_swap)
         self.assertEqual(config.sync.max_swap_table_bytes, 10 * 1024**3)
         self.assertEqual(config.table_config("sample_customer").mode, "truncate")
+        table = config.table_config("sample_customer")
+        self.assertTrue(table.incremental.enabled)
+        self.assertEqual(table.incremental.column, "updated_at")
+        self.assertEqual(table.lob_strategy.columns["BLOB_PAYLOAD"], "null")
+        self.assertTrue(table.validation.checksum.enabled)
 
 
 if __name__ == "__main__":

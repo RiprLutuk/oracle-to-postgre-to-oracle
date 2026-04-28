@@ -8,7 +8,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
+from oracle_pg_sync.checkpoint import CheckpointStore, new_run_id
 from oracle_pg_sync.config import AppConfig, load_config
+from oracle_pg_sync.manifest import RunManifest
 from oracle_pg_sync.utils.logging import setup_logging
 from oracle_pg_sync.utils.naming import split_schema_table
 
@@ -49,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--mode", choices=["truncate", "swap", "append", "upsert", "delete"], help="Override mode")
     sync.add_argument("--execute", action="store_true", help="Benar-benar eksekusi perubahan data")
     sync.add_argument("--force", action="store_true", help="Tetap sync walaupun struktur mismatch")
+    _add_production_sync_args(sync)
 
     report = sub.add_parser("report", help="Generate report.html dari file CSV reports")
     _add_common_args(report)
@@ -90,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd.add_argument("--mode", choices=["truncate", "swap", "append", "upsert", "delete"], help="Override mode")
     all_cmd.add_argument("--execute", action="store_true", help="Benar-benar eksekusi perubahan data")
     all_cmd.add_argument("--force", action="store_true", help="Tetap sync walaupun struktur mismatch")
+    _add_production_sync_args(all_cmd)
     all_cmd.add_argument("--fast-count", action="store_true", help="Use statistic count")
     all_cmd.add_argument("--exact-count", action="store_true", help="Use SELECT COUNT(1)")
     all_cmd.add_argument("--workers", type=int, default=1, help="Parallel audit workers. Default 1 agar ringan")
@@ -104,6 +108,16 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--verbose", action="store_true", default=argparse.SUPPRESS, help="Enable debug logging")
 
 
+def _add_production_sync_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--resume", metavar="RUN_ID", help="Resume sync run from checkpoint")
+    parser.add_argument("--reset-checkpoint", metavar="RUN_ID", help="Delete checkpoint state for RUN_ID and exit")
+    parser.add_argument("--list-runs", action="store_true", help="List checkpoint runs and exit")
+    parser.add_argument("--incremental", action="store_true", help="Use table incremental config and stored watermarks")
+    parser.add_argument("--full-refresh", action="store_true", help="Ignore incremental watermark filter for this run")
+    parser.add_argument("--watermark-status", action="store_true", help="List stored watermarks and exit")
+    parser.add_argument("--reset-watermark", metavar="TABLE_NAME", help="Delete stored watermark for TABLE_NAME and exit")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
@@ -112,6 +126,24 @@ def main(argv: list[str] | None = None) -> int:
     report_dir = Path(config.reports.output_dir)
     logger = setup_logging(report_dir, logging.DEBUG if args.verbose else logging.INFO)
     direction = _resolve_direction(config, getattr(args, "direction", None)) if args.command in {"sync", "all"} else None
+    checkpoint_store = CheckpointStore(config.sync.checkpoint_dir)
+
+    if args.command in {"sync", "all"}:
+        if getattr(args, "list_runs", False):
+            _print_rows(checkpoint_store.list_runs())
+            return 0
+        if getattr(args, "reset_checkpoint", None):
+            checkpoint_store.reset_run(args.reset_checkpoint)
+            logger.info("Checkpoint run dihapus: %s", args.reset_checkpoint)
+            return 0
+        if getattr(args, "watermark_status", False):
+            _print_rows(checkpoint_store.list_watermarks())
+            return 0
+        if getattr(args, "reset_watermark", None):
+            count = checkpoint_store.reset_watermark(args.reset_watermark)
+            logger.info("Watermark dihapus untuk %s rows=%s", args.reset_watermark, count)
+            return 0
+
     tables = _resolve_tables(
         config,
         getattr(args, "tables", None),
@@ -137,6 +169,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "audit":
         from oracle_pg_sync.reports import write_audit_reports
 
+        run_id = new_run_id()
+        manifest = RunManifest(
+            report_dir=report_dir,
+            run_id=run_id,
+            command="audit",
+            config_file=args.config,
+            config=config,
+            direction=None,
+            dry_run=True,
+            tables_requested=tables,
+            checkpoint_path=str(checkpoint_store.path),
+        )
         audit_result = run_audit(config, tables, logger, workers=args.workers)
         write_audit_reports(
             report_dir,
@@ -147,20 +191,60 @@ def main(argv: list[str] | None = None) -> int:
             sql_suggestions_path=_sql_suggestions_path(report_dir, getattr(args, "sql_out", None)),
             suggest_drop=args.suggest_drop,
         )
+        manifest_path = manifest.finish(
+            result_rows=audit_result.inventory_rows,
+            report_files=[
+                str(report_dir / "inventory_summary.csv"),
+                str(report_dir / "column_diff.csv"),
+                str(report_dir / "type_mismatch.csv"),
+                str(report_dir / "report.html"),
+            ],
+        )
+        logger.info("Manifest dibuat: %s", manifest_path)
         logger.info("Audit selesai. Report ada di %s", report_dir)
         return 0
 
     if args.command == "sync":
         from oracle_pg_sync.reports.writer_csv import write_csv
+        from oracle_pg_sync.reports.writer_excel import write_rows_xlsx
 
+        run_id = args.resume or new_run_id()
+        manifest = RunManifest(
+            report_dir=report_dir,
+            run_id=run_id,
+            command="sync",
+            config_file=args.config,
+            config=config,
+            direction=direction,
+            dry_run=not args.execute or config.sync.dry_run and not args.execute,
+            tables_requested=tables,
+            checkpoint_path=str(checkpoint_store.path),
+        )
         results = _sync_runner(config, logger, direction).sync_tables(
             tables,
             mode_override=args.mode,
             execute=args.execute,
             force=args.force,
+            checkpoint_store=checkpoint_store,
+            run_id=run_id,
+            resume=bool(args.resume),
+            incremental=args.incremental,
+            full_refresh=args.full_refresh,
         )
         rows = [result.as_row() for result in results]
         write_csv(report_dir / "sync_result.csv", rows)
+        write_rows_xlsx(report_dir / "sync_result.xlsx", rows, sheet_name="sync_result")
+        checksum_rows = [row for row in rows if row.get("checksum_status")]
+        if checksum_rows:
+            write_csv(report_dir / "validation_checksum.csv", checksum_rows)
+            write_rows_xlsx(report_dir / "validation_checksum.xlsx", checksum_rows, sheet_name="checksum")
+        manifest_path = manifest.finish(
+            result_rows=rows,
+            checksum_rows=checksum_rows,
+            lob_rows=rows,
+            report_files=[str(report_dir / "sync_result.csv"), str(report_dir / "sync_result.xlsx")],
+        )
+        logger.info("Manifest dibuat: %s", manifest_path)
         logger.info("Sync selesai. SUCCESS=%s FAILED=%s SKIPPED=%s DRY_RUN=%s",
                     _count(rows, "SUCCESS"), _count(rows, "FAILED"), _count(rows, "SKIPPED"), _count(rows, "DRY_RUN"))
         return 1 if any(row["status"] == "FAILED" for row in rows) else 0
@@ -211,7 +295,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "all":
         from oracle_pg_sync.reports import write_audit_reports
         from oracle_pg_sync.reports.writer_csv import write_csv
+        from oracle_pg_sync.reports.writer_excel import write_rows_xlsx
 
+        run_id = args.resume or new_run_id()
+        manifest = RunManifest(
+            report_dir=report_dir,
+            run_id=run_id,
+            command="all",
+            config_file=args.config,
+            config=config,
+            direction=direction,
+            dry_run=not args.execute or config.sync.dry_run and not args.execute,
+            tables_requested=tables,
+            checkpoint_path=str(checkpoint_store.path),
+        )
         logger.info("Step 1/3 audit awal")
         run_audit(config, tables, logger, workers=args.workers)
         logger.info("Step 2/3 sync direction=%s", direction)
@@ -222,9 +319,19 @@ def main(argv: list[str] | None = None) -> int:
                 mode_override=args.mode,
                 execute=args.execute,
                 force=args.force,
+                checkpoint_store=checkpoint_store,
+                run_id=run_id,
+                resume=bool(args.resume),
+                incremental=args.incremental,
+                full_refresh=args.full_refresh,
             )
         ]
         write_csv(report_dir / "sync_result.csv", sync_rows)
+        write_rows_xlsx(report_dir / "sync_result.xlsx", sync_rows, sheet_name="sync_result")
+        checksum_rows = [row for row in sync_rows if row.get("checksum_status")]
+        if checksum_rows:
+            write_csv(report_dir / "validation_checksum.csv", checksum_rows)
+            write_rows_xlsx(report_dir / "validation_checksum.xlsx", checksum_rows, sheet_name="checksum")
         logger.info("Step 3/3 audit ulang dan report")
         audit_result = run_audit(config, tables, logger, workers=args.workers)
         write_audit_reports(
@@ -237,6 +344,17 @@ def main(argv: list[str] | None = None) -> int:
             suggest_drop=args.suggest_drop,
             sync_rows=sync_rows,
         )
+        manifest_path = manifest.finish(
+            result_rows=sync_rows,
+            checksum_rows=checksum_rows,
+            lob_rows=sync_rows,
+            report_files=[
+                str(report_dir / "sync_result.csv"),
+                str(report_dir / "inventory_summary.csv"),
+                str(report_dir / "report.html"),
+            ],
+        )
+        logger.info("Manifest dibuat: %s", manifest_path)
         return 1 if any(row["status"] == "FAILED" for row in sync_rows) else 0
 
     return 2
@@ -520,6 +638,16 @@ def _read_csv(path: Path) -> list[dict]:
         return []
     with path.open("r", newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
+
+
+def _print_rows(rows: list[dict]) -> None:
+    if not rows:
+        print("No rows.")
+        return
+    fields = list(rows[0].keys())
+    print(",".join(fields))
+    for row in rows:
+        print(",".join(str(row.get(field, "")) for field in fields))
 
 
 def _count(rows: list[dict], status: str) -> int:

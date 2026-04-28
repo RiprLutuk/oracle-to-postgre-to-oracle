@@ -221,6 +221,11 @@ Syntax `${PG_SCHEMA:-public}` berarti kalau env kosong, pakai `public`.
 - PostgreSQL statement timeout.
 - Default `0`, artinya tidak dibatasi.
 
+`checkpoint_dir`
+
+- Lokasi SQLite checkpoint.
+- Default: `reports/checkpoints/checkpoint.sqlite3`.
+
 Contoh:
 
 ```yaml
@@ -238,7 +243,55 @@ sync:
   keep_old_after_swap: false
   pg_lock_timeout: 5s
   pg_statement_timeout: '0'
+  checkpoint_dir: reports/checkpoints/checkpoint.sqlite3
 ```
+
+## Incremental, Checksum, dan LOB
+
+Table-level incremental:
+
+```yaml
+tables:
+  - name: public.sample_customer
+    key_columns: [customer_id]
+    incremental:
+      enabled: true
+      strategy: updated_at
+      column: updated_at
+      initial_value: null
+      overlap_minutes: 10
+      delete_detection: false
+```
+
+`strategy` dapat berisi `updated_at`, `numeric_key`, atau `oracle_scn`. `oracle_scn` saat ini akan gagal dengan pesan jelas karena Flashback/SCN belum diaktifkan.
+
+Checksum validation:
+
+```yaml
+validation:
+  checksum:
+    enabled: true
+    mode: table
+    columns: auto
+    exclude_columns:
+      - BLOB_PAYLOAD
+    sample_percent: 1
+```
+
+LOB strategy:
+
+```yaml
+lob_strategy:
+  default: error
+
+tables:
+  - name: public.sample_blob_table
+    lob_strategy:
+      columns:
+        BLOB_PAYLOAD: null
+```
+
+Pilihan LOB: `skip`, `null`, `stream`, `error`.
 
 ## reports
 

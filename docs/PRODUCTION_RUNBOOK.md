@@ -119,6 +119,19 @@ python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracl
 
 Pastikan `reports/sync_result.csv` berisi `DRY_RUN`, bukan `FAILED`.
 
+Untuk incremental dry-run:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --tables-file configs/tables.yaml --incremental
+```
+
+Untuk melihat checkpoint dan watermark sebelum execute:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --list-runs
+python -m oracle_pg_sync sync --config config.yaml --watermark-status
+```
+
 ## Step 4. Execute Sync
 
 ```bash
@@ -141,6 +154,18 @@ Pantau:
 
 ```bash
 tail -f reports/sync.log
+```
+
+Jika run gagal setelah beberapa chunk sukses, resume:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --resume RUN_ID --execute
+```
+
+Jangan reset checkpoint kecuali ingin mengulang run dari awal:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --reset-checkpoint RUN_ID
 ```
 
 ## Step 5. Audit Ulang
@@ -169,6 +194,14 @@ Contoh:
 mkdir -p run-logs/$(date +%Y%m%d_%H%M%S)
 cp reports/* run-logs/$(date +%Y%m%d_%H%M%S)/ 2>/dev/null || true
 ```
+
+Manifest durable setiap run ada di:
+
+```text
+reports/run_<timestamp>_<run_id>/manifest.json
+```
+
+Manifest aman untuk audit karena password disanitasi.
 
 ## Lock dan Resource Policy
 

@@ -142,6 +142,27 @@ def count_rows(cur, owner: str, table: str) -> int:
     return int(cur.fetchone()[0])
 
 
+def min_max(cur, owner: str, table: str, column: str) -> tuple[Any, Any]:
+    cur.execute(
+        f"SELECT MIN({qident(column.upper())}), MAX({qident(column.upper())}) "
+        f"FROM {qident(owner.upper())}.{qident(_sql_table_name(cur, owner, table))}"
+    )
+    row = cur.fetchone()
+    return (row[0], row[1]) if row else (None, None)
+
+
+def max_value(cur, owner: str, table: str, column: str, where: str | None = None) -> Any:
+    query = (
+        f"SELECT MAX({qident(column.upper())}) "
+        f"FROM {qident(owner.upper())}.{qident(_sql_table_name(cur, owner, table))}"
+    )
+    if where:
+        query += f" WHERE {where}"
+    cur.execute(query)
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 def truncate_table(cur, owner: str, table: str) -> None:
     cur.execute(f"TRUNCATE TABLE {qident(owner.upper())}.{qident(_sql_table_name(cur, owner, table))}")
 
@@ -600,11 +621,14 @@ def schema_object_rows(cur, owner: str, object_types: set[str]) -> list[dict[str
     return rows
 
 
-def select_rows(cur, owner: str, table: str, columns: list[tuple[str, str]], where: str | None = None):
-    select_list = ", ".join(
-        f"{qident(oracle_column.upper())} AS {qident(pg_column.upper())}"
-        for pg_column, oracle_column in columns
-    )
+def select_rows(cur, owner: str, table: str, columns: list[tuple[str, str | None]], where: str | None = None):
+    select_items = []
+    for pg_column, oracle_column in columns:
+        if oracle_column is None:
+            select_items.append(f"CAST(NULL AS VARCHAR2(4000)) AS {qident(pg_column.upper())}")
+        else:
+            select_items.append(f"{qident(oracle_column.upper())} AS {qident(pg_column.upper())}")
+    select_list = ", ".join(select_items)
     query = f"SELECT {select_list} FROM {qident(owner.upper())}.{qident(_sql_table_name(cur, owner, table))}"
     if where:
         query += f" WHERE {where}"

@@ -63,14 +63,59 @@ class PostgresConfig:
 
 
 @dataclass
+class IncrementalConfig:
+    enabled: bool = False
+    strategy: str = "updated_at"
+    column: str | None = None
+    initial_value: str | int | float | None = None
+    overlap_minutes: int = 5
+    delete_detection: bool = False
+
+
+@dataclass
+class ChecksumConfig:
+    enabled: bool = False
+    mode: str = "table"
+    columns: str | list[str] = "auto"
+    exclude_columns: list[str] = field(default_factory=list)
+    sample_percent: float = 1.0
+
+
+@dataclass
+class ValidationConfig:
+    checksum: ChecksumConfig = field(default_factory=ChecksumConfig)
+
+
+@dataclass
+class LobStrategyConfig:
+    default: str | None = None
+    columns: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
 class TableConfig:
     name: str
+    source_schema: str | None = None
+    source_table: str | None = None
+    target_schema: str | None = None
+    target_table: str | None = None
     mode: str | None = None
     oracle_to_postgres_mode: str | None = None
     postgres_to_oracle_mode: str | None = None
     directions: list[str] = field(default_factory=list)
     key_columns: list[str] = field(default_factory=list)
+    primary_key: list[str] = field(default_factory=list)
     where: str | None = None
+    incremental: IncrementalConfig = field(default_factory=IncrementalConfig)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
+    lob_strategy: LobStrategyConfig = field(default_factory=LobStrategyConfig)
+
+    def __post_init__(self) -> None:
+        if not self.name and self.target_table:
+            target_schema = self.target_schema or "public"
+            self.name = f"{target_schema}.{self.target_table}"
+        if not self.key_columns and self.primary_key:
+            self.key_columns = list(self.primary_key)
 
 
 @dataclass
@@ -94,6 +139,7 @@ class SyncConfig:
     copy_null: str = ""
     pg_lock_timeout: str = "5s"
     pg_statement_timeout: str = "0"
+    checkpoint_dir: Path = Path("reports/checkpoints/checkpoint.sqlite3")
 
 
 @dataclass
@@ -109,6 +155,8 @@ class AppConfig:
     reports: ReportsConfig = field(default_factory=ReportsConfig)
     tables: list[TableConfig] = field(default_factory=list)
     rename_columns: dict[str, dict[str, str]] = field(default_factory=dict)
+    validation: ValidationConfig = field(default_factory=ValidationConfig)
+    lob_strategy: LobStrategyConfig = field(default_factory=lambda: LobStrategyConfig(default="error"))
 
     def table_names(self) -> list[str]:
         return [t.name for t in self.tables]
@@ -179,13 +227,12 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     sync_raw = raw.get("sync") or {}
     if "max_swap_table_bytes" in sync_raw:
         sync_raw["max_swap_table_bytes"] = _parse_size_bytes(sync_raw["max_swap_table_bytes"])
+    if "checkpoint_dir" in sync_raw:
+        sync_raw["checkpoint_dir"] = Path(sync_raw["checkpoint_dir"])
     sync = SyncConfig(**sync_raw)
     reports_raw = raw.get("reports") or {}
     reports = ReportsConfig(output_dir=Path(reports_raw.get("output_dir", "reports")))
-    tables = [
-        TableConfig(**t) if isinstance(t, dict) else TableConfig(name=str(t))
-        for t in raw.get("tables", [])
-    ]
+    tables = [_table_config_from_raw(t) for t in raw.get("tables", [])]
     rename_columns = {
         str(table).lower(): {str(k).lower(): str(v).lower() for k, v in mapping.items()}
         for table, mapping in (raw.get("rename_columns") or {}).items()
@@ -197,7 +244,37 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         reports=reports,
         tables=tables,
         rename_columns=rename_columns,
+        validation=_validation_config_from_raw(raw.get("validation") or {}),
+        lob_strategy=_lob_strategy_from_raw(raw.get("lob_strategy") or {}, default="error"),
     )
+
+
+def _table_config_from_raw(raw: Any) -> TableConfig:
+    if not isinstance(raw, dict):
+        return TableConfig(name=str(raw))
+    item = dict(raw)
+    item["incremental"] = _incremental_config_from_raw(item.get("incremental") or {})
+    item["validation"] = _validation_config_from_raw(item.get("validation") or {})
+    item["lob_strategy"] = _lob_strategy_from_raw(item.get("lob_strategy") or {}, default=None)
+    item.setdefault("name", "")
+    return TableConfig(**item)
+
+
+def _incremental_config_from_raw(raw: dict[str, Any]) -> IncrementalConfig:
+    return IncrementalConfig(**raw)
+
+
+def _validation_config_from_raw(raw: dict[str, Any]) -> ValidationConfig:
+    checksum_raw = raw.get("checksum") or {}
+    return ValidationConfig(checksum=ChecksumConfig(**checksum_raw))
+
+
+def _lob_strategy_from_raw(raw: dict[str, Any], *, default: str | None) -> LobStrategyConfig:
+    columns = {
+        str(key): ("null" if value is None else str(value))
+        for key, value in (raw.get("columns") or {}).items()
+    }
+    return LobStrategyConfig(default=raw.get("default", default), columns=columns)
 
 
 def mask_secret(value: str | None) -> str:

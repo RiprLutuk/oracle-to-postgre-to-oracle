@@ -63,10 +63,28 @@ tables:
         self.assertTrue(args.include_extension_objects)
 
     def test_dependencies_command_accepts_manual_tables(self):
-        args = build_parser().parse_args(["dependencies", "--tables", "ADDRESS", "HOUSEMASTER"])
+        args = build_parser().parse_args(["dependencies", "--tables", "SAMPLE_CUSTOMER", "SAMPLE_LOCATION"])
 
         self.assertEqual(args.command, "dependencies")
-        self.assertEqual(args.tables, ["ADDRESS", "HOUSEMASTER"])
+        self.assertEqual(args.tables, ["SAMPLE_CUSTOMER", "SAMPLE_LOCATION"])
+
+    def test_sync_accepts_checkpoint_incremental_and_watermark_flags(self):
+        args = build_parser().parse_args(
+            [
+                "sync",
+                "--resume",
+                "run123",
+                "--incremental",
+                "--watermark-status",
+                "--reset-watermark",
+                "public.sample",
+            ]
+        )
+
+        self.assertEqual(args.resume, "run123")
+        self.assertTrue(args.incremental)
+        self.assertTrue(args.watermark_status)
+        self.assertEqual(args.reset_watermark, "public.sample")
 
 
 if __name__ == "__main__":

@@ -6,8 +6,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
 
+from oracle_pg_sync.checkpoint import CheckpointStore, Chunk, new_run_id
 from oracle_pg_sync.config import AppConfig, TableConfig
 from oracle_pg_sync.db import oracle, postgres
+from oracle_pg_sync.lob import apply_lob_mapping_policy
 from oracle_pg_sync.metadata.compare import compare_table_metadata, inventory_has_fatal_mismatch
 from oracle_pg_sync.metadata.oracle_metadata import fetch_table_metadata as fetch_oracle_metadata
 from oracle_pg_sync.metadata.postgres_metadata import fetch_table_metadata as fetch_pg_metadata
@@ -26,9 +28,15 @@ class ReverseSyncResult:
     dry_run: bool = True
     message: str = ""
     elapsed_seconds: float = 0.0
+    run_id: str = ""
+    lob_columns_detected: str = ""
+    lob_strategy_applied: str = ""
+    lob_columns_skipped: str = ""
+    lob_columns_nullified: str = ""
 
     def as_row(self) -> dict[str, Any]:
         return {
+            "run_id": self.run_id,
             "table_name": self.table_name,
             "direction": "postgres-to-oracle",
             "mode": self.mode,
@@ -40,6 +48,10 @@ class ReverseSyncResult:
             "dry_run": self.dry_run,
             "message": self.message,
             "elapsed_seconds": round(self.elapsed_seconds, 3),
+            "lob_columns_detected": self.lob_columns_detected,
+            "lob_strategy_applied": self.lob_strategy_applied,
+            "lob_columns_skipped": self.lob_columns_skipped,
+            "lob_columns_nullified": self.lob_columns_nullified,
         }
 
 
@@ -55,23 +67,60 @@ class PostgresToOracleSync:
         mode_override: str | None = None,
         execute: bool = False,
         force: bool = False,
+        checkpoint_store: CheckpointStore | None = None,
+        run_id: str | None = None,
+        resume: bool = False,
+        incremental: bool = False,
+        full_refresh: bool = False,
     ) -> list[ReverseSyncResult]:
+        del incremental, full_refresh
+        run_id = run_id or new_run_id()
+        if checkpoint_store:
+            checkpoint_store.create_run(
+                run_id=run_id,
+                direction="postgres_to_oracle",
+                source_db=self.config.postgres.schema,
+                target_db=self.config.oracle.schema,
+            )
         workers = max(1, int(self.config.sync.parallel_workers or 1))
         if workers == 1:
-            return [
-                self.sync_table(table, mode_override=mode_override, execute=execute, force=force)
+            results = [
+                self.sync_table(
+                    table,
+                    mode_override=mode_override,
+                    execute=execute,
+                    force=force,
+                    checkpoint_store=checkpoint_store,
+                    run_id=run_id,
+                    resume=resume,
+                )
                 for table in tables
             ]
+            if checkpoint_store:
+                checkpoint_store.finish_run(run_id, status="failed" if any(r.status == "FAILED" for r in results) else "success")
+            return results
 
         results: list[ReverseSyncResult] = []
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
-                pool.submit(self.sync_table, table, mode_override=mode_override, execute=execute, force=force): table
+                pool.submit(
+                    self.sync_table,
+                    table,
+                    mode_override=mode_override,
+                    execute=execute,
+                    force=force,
+                    checkpoint_store=checkpoint_store,
+                    run_id=run_id,
+                    resume=resume,
+                ): table
                 for table in tables
             }
             for future in as_completed(futures):
                 results.append(future.result())
-        return sorted(results, key=lambda r: r.table_name)
+        results = sorted(results, key=lambda r: r.table_name)
+        if checkpoint_store:
+            checkpoint_store.finish_run(run_id, status="failed" if any(r.status == "FAILED" for r in results) else "success")
+        return results
 
     def sync_table(
         self,
@@ -80,6 +129,9 @@ class PostgresToOracleSync:
         mode_override: str | None = None,
         execute: bool = False,
         force: bool = False,
+        checkpoint_store: CheckpointStore | None = None,
+        run_id: str | None = None,
+        resume: bool = False,
     ) -> ReverseSyncResult:
         started = time.time()
         table = split_schema_table(table_name, self.config.postgres.schema)
@@ -91,7 +143,8 @@ class PostgresToOracleSync:
             or "truncate"
         ).lower()
         dry_run = not execute or self.config.sync.dry_run and not execute
-        result = ReverseSyncResult(table.fqname, mode, "PENDING", dry_run=dry_run)
+        run_id = run_id or new_run_id()
+        result = ReverseSyncResult(table.fqname, mode, "PENDING", dry_run=dry_run, run_id=run_id)
 
         self.logger.info("Reverse sync %s mode=%s dry_run=%s", table.fqname, mode, dry_run)
 
@@ -132,11 +185,38 @@ class PostgresToOracleSync:
                         result.status = "SKIPPED"
                         result.message = "tidak ada kolom yang bisa dimapping"
                         return result
+                    mapping, lob_summary = apply_lob_mapping_policy(
+                        mapping,
+                        config=self.config,
+                        table_cfg=table_cfg,
+                        table_name=table.fqname,
+                        source_columns=pg_meta.columns,
+                    )
+                    self._apply_lob_summary(result, lob_summary)
+                    if not mapping:
+                        result.status = "SKIPPED"
+                        result.message = "semua kolom termapping di-skip oleh lob_strategy"
+                        return result
 
                     if dry_run:
                         result.status = "DRY_RUN"
                         result.message = f"akan load {len(mapping)} kolom dari PostgreSQL ke Oracle"
                         return result
+
+                    if checkpoint_store:
+                        chunk = Chunk(table_name=table.fqname, chunk_key="full")
+                        checkpoint_store.ensure_chunk(
+                            run_id=run_id,
+                            direction="postgres_to_oracle",
+                            source_db=self.config.postgres.schema,
+                            target_db=self.config.oracle.schema,
+                            chunk=chunk,
+                        )
+                        if resume and checkpoint_store.chunk_status(run_id, table.fqname, "full") == "success":
+                            result.status = "SKIPPED"
+                            result.message = "checkpoint chunk full sudah success"
+                            return result
+                        checkpoint_store.start_chunk(run_id, table.fqname, "full")
 
                     if mode == "truncate":
                         rows = self._sync_truncate(pcur, ocur, table.schema, table.table, owner, mapping, table_cfg.where)
@@ -159,6 +239,15 @@ class PostgresToOracleSync:
                         raise ValueError(f"Unsupported reverse sync mode: {mode}")
 
                     result.rows_loaded = rows
+                    if checkpoint_store:
+                        checkpoint_store.finish_chunk(
+                            run_id,
+                            table.fqname,
+                            "full",
+                            status="success",
+                            rows_attempted=rows,
+                            rows_success=rows,
+                        )
                     if self.config.sync.exact_count_after_load:
                         result.oracle_row_count = oracle.count_rows(ocur, owner, table.table)
                         result.postgres_row_count = postgres.count_rows(pcur, table.schema, table.table)
@@ -174,6 +263,8 @@ class PostgresToOracleSync:
                     ocon.commit()
                     return result
         except Exception as exc:
+            if checkpoint_store and run_id:
+                checkpoint_store.finish_chunk(run_id, table.fqname, "full", status="failed", error_message=str(exc))
             result.status = "FAILED"
             result.message = str(exc)
             self.logger.exception("Reverse sync failed for %s", table.fqname)
@@ -188,7 +279,7 @@ class PostgresToOracleSync:
         pg_schema: str,
         table: str,
         oracle_owner: str,
-        mapping: list[tuple[str, str]],
+        mapping: list[tuple[str, str | None]],
         where: str | None,
     ) -> int:
         oracle.truncate_table(ocur, oracle_owner, table)
@@ -201,7 +292,7 @@ class PostgresToOracleSync:
         pg_schema: str,
         table: str,
         oracle_owner: str,
-        mapping: list[tuple[str, str]],
+        mapping: list[tuple[str, str | None]],
         where: str | None,
     ) -> int:
         oracle.delete_rows(ocur, oracle_owner, table)
@@ -214,7 +305,7 @@ class PostgresToOracleSync:
         pg_schema: str,
         table: str,
         oracle_owner: str,
-        mapping: list[tuple[str, str]],
+        mapping: list[tuple[str, str | None]],
         key_columns: list[str],
         where: str | None,
     ) -> int:
@@ -238,7 +329,7 @@ class PostgresToOracleSync:
         pg_schema: str,
         table: str,
         oracle_owner: str,
-        mapping: list[tuple[str, str]],
+        mapping: list[tuple[str, str | None]],
         where: str | None,
         upsert_keys: list[str] | None = None,
     ) -> int:
@@ -286,6 +377,15 @@ class PostgresToOracleSync:
             if pg_candidate in pg_colset:
                 mapping.append((oracle_name_l, pg_candidate))
         return mapping
+
+    @staticmethod
+    def _apply_lob_summary(result: ReverseSyncResult, summary: dict[str, Any]) -> None:
+        result.lob_columns_detected = ";".join(summary.get("lob_columns_detected") or [])
+        result.lob_strategy_applied = ";".join(
+            f"{k}:{v}" for k, v in (summary.get("lob_strategy_applied") or {}).items()
+        )
+        result.lob_columns_skipped = ";".join(summary.get("lob_columns_skipped") or [])
+        result.lob_columns_nullified = ";".join(summary.get("lob_columns_nullified") or [])
 
 
 def _clean_value(value: Any) -> Any:

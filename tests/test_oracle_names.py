@@ -27,22 +27,19 @@ class FakeCursor:
 
 class OracleNameResolutionTest(unittest.TestCase):
     def test_resolve_table_name_falls_back_to_case_insensitive_lookup(self):
-        cur = FakeCursor({"modemregdereghistory": "ModemRegDeregHistory"})
+        cur = FakeCursor({"samplemixedcase": "SampleMixedCase"})
 
-        self.assertEqual(
-            oracle.resolve_table_name(cur, "PRD_AMSPBRIM", "modemregdereghistory"),
-            "ModemRegDeregHistory",
-        )
+        self.assertEqual(oracle.resolve_table_name(cur, "SAMPLE_APP", "samplemixedcase"), "SampleMixedCase")
 
     def test_table_exists_supports_quoted_mixed_case_oracle_tables(self):
-        cur = FakeCursor({"modemregdereghistory": "ModemRegDeregHistory"})
+        cur = FakeCursor({"samplemixedcase": "SampleMixedCase"})
 
-        self.assertTrue(oracle.table_exists(cur, "PRD_AMSPBRIM", "modemregdereghistory"))
+        self.assertTrue(oracle.table_exists(cur, "SAMPLE_APP", "samplemixedcase"))
 
     def test_resolve_table_name_prefers_uppercase_exact_match(self):
-        cur = FakeCursor({"ADDRESS": "ADDRESS", "address": "Address"})
+        cur = FakeCursor({"SAMPLE_TABLE": "SAMPLE_TABLE", "sample_table": "Sample_Table"})
 
-        self.assertEqual(oracle.resolve_table_name(cur, "PRD_AMSPBRIM", "address"), "ADDRESS")
+        self.assertEqual(oracle.resolve_table_name(cur, "SAMPLE_APP", "sample_table"), "SAMPLE_TABLE")
 
 
 if __name__ == "__main__":

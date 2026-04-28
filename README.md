@@ -1,5 +1,7 @@
 # oracle-pg-sync-audit
 
+[![CI](https://github.com/RiprLutuk/oracle-to-postgre-to-oracle/actions/workflows/ci.yml/badge.svg)](https://github.com/RiprLutuk/oracle-to-postgre-to-oracle/actions/workflows/ci.yml)
+
 Project ini menyatukan audit metadata, compare rowcount, sync data Oracle ke PostgreSQL, sync reverse PostgreSQL ke Oracle, dan reporting DBA dalam satu CLI modular.
 
 ## Guide Lengkap
@@ -7,6 +9,7 @@ Project ini menyatukan audit metadata, compare rowcount, sync data Oracle ke Pos
 - [Quick Start](docs/USER_GUIDE.md): setup awal, install, isi `.env`, isi `config.yaml`, dan command harian.
 - [Configuration Reference](docs/CONFIG_REFERENCE.md): penjelasan semua field `.env` dan `config.yaml`.
 - [Production Runbook](docs/PRODUCTION_RUNBOOK.md): alur audit, dry-run, eksekusi, validasi, rollback, dan checklist produksi.
+- [Production Safety Features](docs/PRODUCTION_FEATURES.md): checkpoint/resume, incremental sync, checksum validation, LOB strategy, run manifest, dan CI.
 - [Report Reference](docs/REPORT_REFERENCE.md): arti setiap file report dan cara membaca status `MATCH`, `WARNING`, `MISMATCH`, `MISSING`.
 - [Troubleshooting](docs/TROUBLESHOOTING.md): error umum Oracle, PostgreSQL, dependency, rowcount, dan sync.
 - [Oracle Client Install](docs/ORACLE_CLIENT_INSTALL.md): cara install Oracle Instant Client 23.9 untuk thick mode.
@@ -109,6 +112,7 @@ Sync Oracle ke PostgreSQL dry-run, default aman. Default mode sekarang `truncate
 ```bash
 python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables sample_customer
 python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables-file configs/tables.yaml --limit 10
+python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables-file configs/tables.yaml --incremental
 ```
 
 Sync PostgreSQL ke Oracle dry-run:
@@ -122,6 +126,16 @@ Eksekusi sync sungguhan:
 ```bash
 python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables sample_customer --execute
 python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables sample_customer --mode truncate --execute
+```
+
+Checkpoint/resume dan watermark:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --list-runs
+python -m oracle_pg_sync sync --config config.yaml --resume RUN_ID --execute
+python -m oracle_pg_sync sync --config config.yaml --reset-checkpoint RUN_ID
+python -m oracle_pg_sync sync --config config.yaml --watermark-status
+python -m oracle_pg_sync sync --config config.yaml --reset-watermark public.sample_customer
 ```
 
 Generate ulang HTML dari CSV:
@@ -154,6 +168,7 @@ Semua output masuk ke `reports/`:
 - `sync_result.csv`
 - `sync.log`
 - `report.html`
+- `run_<timestamp>_<run_id>/manifest.json`
 
 `report.html` menampilkan total table, jumlah `MATCH`, `WARNING`, `MISMATCH`, `MISSING`, top table rowcount terbesar, column mismatch, rowcount mismatch, dependency terbesar, dan table yang gagal sync.
 
@@ -170,6 +185,11 @@ Oracle ke PostgreSQL memakai PostgreSQL `COPY FROM STDIN`. PostgreSQL ke Oracle 
 ## Safety Production
 
 - `sync` tidak mengubah data kecuali diberi `--execute`.
+- Setiap audit/sync/all membuat run manifest tanpa password.
+- Checkpoint SQLite disimpan di `reports/checkpoints/` dan dapat dipakai untuk `--resume RUN_ID`.
+- Incremental sync memakai watermark tersimpan dan hanya mengupdate watermark setelah sync sukses.
+- Checksum validation dapat diaktifkan untuk mendeteksi mismatch data selain rowcount.
+- LOB sync default `error`; pilih `skip`, `null`, atau `stream` secara eksplisit.
 - Default `parallel_workers: 1`, `fast_count: true`, dan `exact_count_after_load: false` supaya tidak terlalu berat di client/server.
 - PostgreSQL `pg_lock_timeout: 5s` membuat sync gagal cepat jika table sedang terkunci, bukan menunggu lock lama.
 - Jika struktur mismatch fatal, table di-skip kecuali pakai `--force`.
@@ -185,6 +205,8 @@ Oracle ke PostgreSQL memakai PostgreSQL `COPY FROM STDIN`. PostgreSQL ke Oracle 
 
 - Dependency rebuild untuk view/materialized view kompleks belum otomatis.
 - Partitioned table dan LOB sangat besar mungkin butuh tuning batch/chunk tambahan.
+- Incremental `oracle_scn` baru tersedia sebagai interface/config guard; implementasi Flashback/SCN akan gagal jelas sampai diaktifkan.
+- PostgreSQL function/procedure body dependency ke table tidak selalu tersedia di `pg_depend`; gunakan global object compare untuk validasi object existence.
 - Upsert membutuhkan unique index/constraint di PostgreSQL sesuai `key_columns`.
 - Type compatibility bersifat fuzzy untuk audit; keputusan final perubahan DDL tetap harus direview DBA.
 

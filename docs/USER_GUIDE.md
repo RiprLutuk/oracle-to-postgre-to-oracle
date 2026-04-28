@@ -239,6 +239,65 @@ python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgre
 python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables sample_customer --mode truncate --execute
 ```
 
+## 10. Checkpoint, Incremental, Checksum, dan LOB
+
+Lihat run checkpoint:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --list-runs
+```
+
+Resume run gagal:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --resume RUN_ID --execute
+```
+
+Incremental sync berbasis config table:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --tables-file configs/tables.yaml --incremental
+python -m oracle_pg_sync sync --config config.yaml --tables-file configs/tables.yaml --incremental --execute
+```
+
+Cek watermark:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --watermark-status
+```
+
+Contoh table dengan BLOB `BLOB_PAYLOAD` dibuat `NULL`, incremental `updated_at`, dan checksum tanpa BLOB:
+
+```yaml
+tables:
+  - source_schema: SAMPLE_APP
+    source_table: SAMPLE_BLOB_TABLE
+    target_schema: public
+    target_table: sample_blob_table
+    primary_key:
+      - record_id
+    incremental:
+      enabled: true
+      strategy: updated_at
+      column: updated_at
+      overlap_minutes: 10
+    lob_strategy:
+      columns:
+        BLOB_PAYLOAD: null
+    validation:
+      checksum:
+        enabled: true
+        mode: batch
+        exclude_columns:
+          - BLOB_PAYLOAD
+```
+
+Setiap audit/sync/all membuat manifest:
+
+```text
+reports/run_<timestamp>_<run_id>/manifest.json
+```
+
 Jika struktur mismatch, table akan di-skip. Pakai `--force` hanya setelah DBA menyetujui risiko:
 
 ```bash

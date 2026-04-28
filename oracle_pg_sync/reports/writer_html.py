@@ -22,6 +22,7 @@ def write_html_report(
     )[:10]
     rowcount_mismatch = [row for row in inventory_rows if not row.get("row_count_match")]
     failed_sync = [row for row in sync_rows if row.get("status") in {"FAILED", "WARNING", "SKIPPED"}]
+    checksum_rows = [row for row in sync_rows if row.get("checksum_status")]
     dependency_heavy = sorted(
         inventory_rows,
         key=lambda row: int(row.get("view_count_related_oracle") or 0)
@@ -30,6 +31,12 @@ def write_html_report(
         + int(row.get("function_count_related_postgres") or 0),
         reverse=True,
     )[:10]
+    manifests = sorted(path.parent.glob("run_*/manifest.json"), reverse=True)
+    manifest_link = (
+        f'<p>Latest manifest: <a href="{escape(str(manifests[0].relative_to(path.parent)))}">manifest.json</a></p>'
+        if manifests
+        else ""
+    )
 
     html = f"""<!doctype html>
 <html lang="en">
@@ -50,6 +57,7 @@ def write_html_report(
 </head>
 <body>
   <h1>Oracle PostgreSQL Sync Audit</h1>
+  {manifest_link}
   <div class="metrics">
     <div class="metric">Total Table<strong>{len(inventory_rows)}</strong></div>
     <div class="metric">MATCH<strong>{status_counts.get("MATCH", 0)}</strong></div>
@@ -67,6 +75,8 @@ def write_html_report(
   {_table(dependency_heavy, ["table_name", "view_count_related_oracle", "view_count_related_postgres", "stored_procedure_count_related_oracle", "function_count_related_postgres"])}
   <h2>Sync Bermasalah</h2>
   {_table(failed_sync[:100], ["table_name", "mode", "status", "rows_loaded", "message"])}
+  <h2>Checksum Validation</h2>
+  {_table(checksum_rows[:100], ["table_name", "checksum_status", "checksum_source_rows", "checksum_target_rows", "checksum_source_hash", "checksum_target_hash"])}
 </body>
 </html>
 """

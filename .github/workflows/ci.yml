@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile
+        run: python -m compileall oracle_pg_sync tests
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests
+
+      - name: Parse config example
+        run: |
+          python - <<'PY'
+          from oracle_pg_sync.config import load_config
+          cfg = load_config("config.yaml.example")
+          assert cfg.sync.dry_run is True
+          assert cfg.reports.output_dir
+          PY
+
+      - name: Basic committed secret check
+        run: |
+          ! git ls-files | grep -E '(^|/)\.env$|(^|/)config\.yaml$|(^|/)configs/tables\.yaml$'
+          ! git grep -n 'BEGIN .*PRIVATE KEY'

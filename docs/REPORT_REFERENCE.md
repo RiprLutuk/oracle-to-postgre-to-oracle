@@ -48,9 +48,21 @@ Semua output masuk ke folder `reports/` kecuali diubah melalui `reports.output_d
 - Log runtime.
 - Dipakai untuk investigasi error.
 
+`validation_checksum.csv`
+
+- Hasil checksum validation jika fitur checksum aktif.
+- Field penting: `table_name`, `chunk_key`, `source_hash`, `target_hash`, `row_count_source`, `row_count_target`, `status`.
+
+`run_<timestamp>_<run_id>/manifest.json`
+
+- Manifest durable setiap audit/sync/all.
+- Berisi run id, command, durasi, git commit, config hash, scope table, rows summary, checksum/lob summary, checkpoint path, report files, dan errors.
+- Password/secret tidak ditulis.
+
 `report.html`
 
 - Dashboard HTML untuk DBA.
+- Menampilkan link ke manifest terbaru jika tersedia.
 
 ## inventory_summary.csv
 
@@ -291,6 +303,15 @@ Field:
 `elapsed_seconds`
 
 - Durasi proses table.
+
+Field tambahan production safety:
+
+- `run_id`
+- `checksum_status`
+- `lob_columns_detected`
+- `lob_strategy_applied`
+- `lob_columns_skipped`
+- `lob_columns_nullified`
 
 ## Cara Review Report
 

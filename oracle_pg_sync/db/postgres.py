@@ -36,6 +36,26 @@ def count_rows(cur, schema: str, table: str) -> int:
     return int(cur.fetchone()[0])
 
 
+def min_max(cur, schema: str, table: str, column: str) -> tuple[Any, Any]:
+    cur.execute(
+        sql.SQL("SELECT MIN({col}), MAX({col}) FROM {}").format(
+            table_ident(schema, table),
+            col=sql.Identifier(column),
+        )
+    )
+    row = cur.fetchone()
+    return (row[0], row[1]) if row else (None, None)
+
+
+def max_value(cur, schema: str, table: str, column: str, where: str | None = None) -> Any:
+    statement = sql.SQL("SELECT MAX({}) FROM {}").format(sql.Identifier(column), table_ident(schema, table))
+    if where:
+        statement += sql.SQL(" WHERE ") + sql.SQL(where)
+    cur.execute(statement)
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 def fast_count_rows(cur, schema: str, table: str) -> int | None:
     cur.execute(
         """
@@ -582,9 +602,10 @@ def set_local_timeouts(cur, *, lock_timeout: str | None = None, statement_timeou
         cur.execute(sql.SQL("SET LOCAL statement_timeout = {}").format(sql.Literal(statement_timeout)))
 
 
-def select_rows(cur, schema: str, table: str, columns: list[str], where: str | None = None):
+def select_rows(cur, schema: str, table: str, columns: list[str | None], where: str | None = None):
+    select_items = [sql.SQL("NULL") if col is None else sql.Identifier(col) for col in columns]
     statement = sql.SQL("SELECT {} FROM {}").format(
-        sql.SQL(", ").join(sql.Identifier(col) for col in columns),
+        sql.SQL(", ").join(select_items),
         table_ident(schema, table),
     )
     if where:
