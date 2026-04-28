@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from oracle_pg_sync.cli import _resolve_tables, build_parser
+from oracle_pg_sync.cli import _apply_where_override, _resolve_tables, build_parser
 from oracle_pg_sync.config import AppConfig, OracleConfig, PostgresConfig, TableConfig
 
 
@@ -85,6 +85,34 @@ tables:
         self.assertTrue(args.incremental)
         self.assertTrue(args.watermark_status)
         self.assertEqual(args.reset_watermark, "public.sample")
+
+    def test_sync_accepts_where_override(self):
+        args = build_parser().parse_args(
+            [
+                "sync",
+                "--direction",
+                "postgres-to-oracle",
+                "--mode",
+                "upsert",
+                "--where",
+                "updated_at >= NOW() - INTERVAL '5 minutes'",
+                "--tables",
+                "sample_customer",
+            ]
+        )
+
+        self.assertEqual(args.where, "updated_at >= NOW() - INTERVAL '5 minutes'")
+
+    def test_where_override_updates_table_config(self):
+        config = AppConfig(
+            oracle=OracleConfig(),
+            postgres=PostgresConfig(),
+            tables=[TableConfig(name="public.sample_customer")],
+        )
+
+        _apply_where_override(config, ["sample_customer"], "updated_at >= '2026-01-01'")
+
+        self.assertEqual(config.tables[0].where, "updated_at >= '2026-01-01'")
 
 
 if __name__ == "__main__":

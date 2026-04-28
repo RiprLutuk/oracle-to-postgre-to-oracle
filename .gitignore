@@ -24,6 +24,7 @@ reports/*.sql
 reports/checkpoints/
 reports/run_*/
 !reports/.gitkeep
+local/private/
 *.log
 *.pem
 *.key

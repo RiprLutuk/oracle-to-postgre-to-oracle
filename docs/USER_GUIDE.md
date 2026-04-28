@@ -221,6 +221,13 @@ Reverse sync PostgreSQL ke Oracle juga dry-run secara default:
 python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables sample_customer --mode truncate
 ```
 
+Untuk job incremental manual dari PostgreSQL ke Oracle tanpa memasukkan filter ke `config.yaml`,
+pakai `--where` pada satu table per command:
+
+```bash
+python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables sample_customer --mode upsert --where "updated_at >= NOW() - INTERVAL '5 minutes'"
+```
+
 Lihat hasilnya di:
 
 ```text
@@ -237,6 +244,7 @@ Eksekusi sungguhan wajib pakai `--execute`:
 ```bash
 python -m oracle_pg_sync sync --config config.yaml --direction oracle-to-postgres --tables sample_customer --execute
 python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables sample_customer --mode truncate --execute
+python -m oracle_pg_sync sync --config config.yaml --direction postgres-to-oracle --tables sample_customer --mode upsert --where "updated_at >= NOW() - INTERVAL '5 minutes'" --execute
 ```
 
 ## 10. Checkpoint, Incremental, Checksum, dan LOB

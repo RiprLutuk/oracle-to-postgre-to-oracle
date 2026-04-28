@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from oracle_pg_sync.checkpoint import CheckpointStore, new_run_id
-from oracle_pg_sync.config import AppConfig, load_config
+from oracle_pg_sync.config import AppConfig, TableConfig, load_config
 from oracle_pg_sync.manifest import RunManifest
 from oracle_pg_sync.utils.logging import setup_logging
 from oracle_pg_sync.utils.naming import split_schema_table
@@ -49,6 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Arah sync. Default dari sync.default_direction.",
     )
     sync.add_argument("--mode", choices=["truncate", "swap", "append", "upsert", "delete"], help="Override mode")
+    sync.add_argument(
+        "--where",
+        help="Override WHERE filter for this sync run. Intended for one-table jobs, for example cron upsert windows.",
+    )
     sync.add_argument("--execute", action="store_true", help="Benar-benar eksekusi perubahan data")
     sync.add_argument("--force", action="store_true", help="Tetap sync walaupun struktur mismatch")
     _add_production_sync_args(sync)
@@ -91,6 +95,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Arah sync. Default dari sync.default_direction.",
     )
     all_cmd.add_argument("--mode", choices=["truncate", "swap", "append", "upsert", "delete"], help="Override mode")
+    all_cmd.add_argument(
+        "--where",
+        help="Override WHERE filter for the sync step. Intended for one-table jobs.",
+    )
     all_cmd.add_argument("--execute", action="store_true", help="Benar-benar eksekusi perubahan data")
     all_cmd.add_argument("--force", action="store_true", help="Tetap sync walaupun struktur mismatch")
     _add_production_sync_args(all_cmd)
@@ -165,6 +173,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if not tables and args.command not in {"report", "audit-objects"}:
         raise SystemExit("Tidak ada table target. Isi config.tables atau pakai --tables.")
+    _apply_where_override(config, tables, getattr(args, "where", None))
 
     if args.command == "audit":
         from oracle_pg_sync.reports import write_audit_reports
@@ -541,6 +550,19 @@ def _resolve_tables(
     if direction:
         return _apply_limit(config.table_names_for_direction(direction), limit)
     return _apply_limit(config.table_names(), limit)
+
+
+def _apply_where_override(config: AppConfig, tables: list[str], where: str | None) -> None:
+    if not where:
+        return
+    if len(tables) != 1:
+        raise SystemExit("--where hanya boleh dipakai untuk satu table per command.")
+    table_name = tables[0]
+    table_cfg = config.table_config(table_name)
+    if table_cfg is None:
+        table_cfg = TableConfig(name=table_name)
+        config.tables.append(table_cfg)
+    table_cfg.where = where
 
 
 def _apply_limit(tables: list[str], limit: int | None) -> list[str]:
