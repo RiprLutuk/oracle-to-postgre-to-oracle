@@ -20,6 +20,9 @@ def write_rows_xlsx(path: Path, rows: list[dict], *, sheet_name: str = "rows") -
 def write_central_report_xlsx(
     path: Path,
     *,
+    inventory_rows: list[dict] | None = None,
+    column_diff_rows: list[dict] | None = None,
+    type_mismatch_rows: list[dict] | None = None,
     sync_rows: list[dict] | None = None,
     checksum_rows: list[dict] | None = None,
     dependency_rows: list[dict] | None = None,
@@ -29,24 +32,37 @@ def write_central_report_xlsx(
     config_sanitized: dict[str, Any] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    inventory_rows = inventory_rows or []
+    column_diff_rows = column_diff_rows or []
+    type_mismatch_rows = type_mismatch_rows or []
     sync_rows = sync_rows or []
     checksum_rows = checksum_rows or []
     dependency_rows = dependency_rows or []
     maintenance_rows = maintenance_rows or []
     watermark_rows = watermark_rows or []
     checkpoint_rows = checkpoint_rows or []
+    table_status_rows = sync_rows or inventory_rows
+    rowcount_rows = _rowcount_rows(sync_rows, inventory_rows)
+    error_rows = _error_rows(sync_rows, maintenance_rows)
     sheets = {
-        "00_Dashboard": [_dashboard_row(sync_rows, checksum_rows)],
-        "01_Table_Status": sync_rows,
-        "02_Rowcount": sync_rows,
-        "03_Checksum": checksum_rows,
-        "04_LOB": [row for row in sync_rows if row.get("lob_columns_detected")],
-        "05_Object_Dependency": dependency_rows,
-        "06_MV_View": maintenance_rows,
-        "07_Watermark": watermark_rows,
-        "08_Checkpoint": checkpoint_rows,
-        "09_Errors": [{"table_name": row.get("table_name"), "message": row.get("message")} for row in sync_rows if row.get("message")],
-        "10_Config_Sanitized": _flatten_config(config_sanitized or {}),
+        "00_Dashboard": [_dashboard_row(table_status_rows, checksum_rows, watermark_rows, checkpoint_rows)],
+        "01_Run_Summary": [_run_summary_row(table_status_rows, checksum_rows, watermark_rows, checkpoint_rows)],
+        "02_Table_Sync_Status": table_status_rows,
+        "03_Rowcount_Compare": rowcount_rows,
+        "04_Checksum_Result": checksum_rows,
+        "05_Column_Structure_Diff": column_diff_rows + type_mismatch_rows,
+        "06_Index_Compare": _filter_dependency_rows(dependency_rows, {"INDEX"}),
+        "07_View_SP_Sequence": _filter_dependency_rows(
+            dependency_rows,
+            {"VIEW", "MATERIALIZED VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE"},
+        ),
+        "08_LOB_Columns": [row for row in sync_rows if row.get("lob_columns_detected")],
+        "09_Failed_Tables": [row for row in table_status_rows if str(row.get("status", "")).upper() in {"FAILED", "MISMATCH", "MISSING"}],
+        "10_Watermark": watermark_rows,
+        "11_Checkpoint_Resume": checkpoint_rows,
+        "12_Performance": _performance_rows(sync_rows),
+        "13_Errors_Log": error_rows,
+        "14_Config_Sanitized": _flatten_config(config_sanitized or {}),
     }
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for name, rows in sheets.items():
@@ -56,16 +72,91 @@ def write_central_report_xlsx(
             _format_sheet(worksheet)
 
 
-def _dashboard_row(sync_rows: list[dict], checksum_rows: list[dict]) -> dict[str, Any]:
+def _dashboard_row(
+    table_rows: list[dict],
+    checksum_rows: list[dict],
+    watermark_rows: list[dict],
+    checkpoint_rows: list[dict],
+) -> dict[str, Any]:
     return {
-        "total_tables": len(sync_rows),
-        "success": sum(1 for row in sync_rows if row.get("status") == "SUCCESS"),
-        "failed": sum(1 for row in sync_rows if row.get("status") == "FAILED"),
+        "total_tables": len(table_rows),
+        "success": sum(1 for row in table_rows if str(row.get("status", "")).upper() in {"SUCCESS", "MATCH"}),
+        "failed": sum(1 for row in table_rows if str(row.get("status", "")).upper() in {"FAILED", "MISMATCH", "MISSING"}),
         "checksum_pass": sum(1 for row in checksum_rows if row.get("status") == "MATCH"),
         "checksum_fail": sum(1 for row in checksum_rows if row.get("status") == "MISMATCH"),
-        "rows_processed": sum(int(row.get("rows_loaded") or 0) for row in sync_rows),
-        "resume_usage": sum(1 for row in sync_rows if row.get("run_id")),
+        "rows_processed": sum(int(row.get("rows_loaded") or 0) for row in table_rows),
+        "watermark_updates": len(watermark_rows),
+        "resume_usage": sum(1 for row in checkpoint_rows if row.get("chunk_key") or row.get("status")),
     }
+
+
+def _run_summary_row(
+    table_rows: list[dict],
+    checksum_rows: list[dict],
+    watermark_rows: list[dict],
+    checkpoint_rows: list[dict],
+) -> dict[str, Any]:
+    row = _dashboard_row(table_rows, checksum_rows, watermark_rows, checkpoint_rows)
+    row["duration_seconds"] = round(sum(float(item.get("elapsed_seconds") or 0) for item in table_rows), 3)
+    row["warning"] = sum(1 for item in table_rows if str(item.get("status", "")).upper() == "WARNING")
+    row["dry_run"] = sum(1 for item in table_rows if str(item.get("status", "")).upper() == "DRY_RUN")
+    return row
+
+
+def _rowcount_rows(sync_rows: list[dict], inventory_rows: list[dict]) -> list[dict]:
+    rows = sync_rows or inventory_rows
+    return [
+        {
+            "table_name": row.get("table_name"),
+            "oracle_row_count": row.get("oracle_row_count"),
+            "postgres_row_count": row.get("postgres_row_count"),
+            "row_count_match": row.get("row_count_match"),
+            "status": row.get("status"),
+        }
+        for row in rows
+    ]
+
+
+def _filter_dependency_rows(rows: list[dict], object_types: set[str]) -> list[dict]:
+    return [row for row in rows if str(row.get("object_type", "")).upper() in object_types]
+
+
+def _performance_rows(sync_rows: list[dict]) -> list[dict]:
+    return [
+        {
+            "table_name": row.get("table_name"),
+            "mode": row.get("mode"),
+            "rows_loaded": row.get("rows_loaded"),
+            "elapsed_seconds": row.get("elapsed_seconds"),
+            "rows_per_second": _rows_per_second(row),
+        }
+        for row in sync_rows
+    ]
+
+
+def _rows_per_second(row: dict) -> float | None:
+    elapsed = float(row.get("elapsed_seconds") or 0)
+    if elapsed <= 0:
+        return None
+    return round(float(row.get("rows_loaded") or 0) / elapsed, 3)
+
+
+def _error_rows(sync_rows: list[dict], maintenance_rows: list[dict]) -> list[dict]:
+    rows = [
+        {"table_name": row.get("table_name"), "source": "sync", "message": row.get("message")}
+        for row in sync_rows
+        if row.get("message")
+    ]
+    rows.extend(
+        {
+            "table_name": row.get("table_name"),
+            "source": "dependency_maintenance",
+            "message": row.get("error_message") or row.get("message"),
+        }
+        for row in maintenance_rows
+        if row.get("error_message") or row.get("message")
+    )
+    return rows
 
 
 def _format_sheet(worksheet) -> None:

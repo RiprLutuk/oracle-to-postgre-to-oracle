@@ -219,6 +219,10 @@ def main(argv: list[str] | None = None) -> int:
         _write_audit_run_reports(
             manifest,
             report_dir=report_dir,
+            inventory_rows=audit_result.inventory_rows,
+            column_diff_rows=audit_result.column_diff_rows,
+            type_mismatch_rows=audit_result.type_mismatch_rows,
+            dependency_rows=audit_result.dependency_rows,
             config=config,
             write_central_report_xlsx=write_central_report_xlsx,
         )
@@ -933,6 +937,10 @@ def _write_audit_run_reports(
     manifest: RunManifest,
     *,
     report_dir: Path,
+    inventory_rows: list[dict] | None = None,
+    column_diff_rows: list[dict] | None = None,
+    type_mismatch_rows: list[dict] | None = None,
+    dependency_rows: list[dict] | None = None,
     config: AppConfig,
     write_central_report_xlsx,
 ) -> None:
@@ -940,8 +948,12 @@ def _write_audit_run_reports(
     run_dir.mkdir(parents=True, exist_ok=True)
     write_central_report_xlsx(
         run_dir / "report.xlsx",
+        inventory_rows=inventory_rows or [],
+        column_diff_rows=column_diff_rows or [],
+        type_mismatch_rows=type_mismatch_rows or [],
         sync_rows=[],
         checksum_rows=[],
+        dependency_rows=dependency_rows or [],
         config_sanitized=sanitize(config),
     )
     html_path = report_dir / "report.html"

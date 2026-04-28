@@ -176,8 +176,29 @@ Semua output masuk ke `reports/`:
 - `sync.log`
 - `report.html`
 - `run_<timestamp>_<run_id>/manifest.json`
+- `run_<timestamp>_<run_id>/report.xlsx`
+- `run_<timestamp>_<run_id>/report.html`
+- `run_<timestamp>_<run_id>/logs.txt`
 
-`report.html` menampilkan total table, jumlah `MATCH`, `WARNING`, `MISMATCH`, `MISSING`, top table rowcount terbesar, column mismatch, rowcount mismatch, dependency terbesar, dan table yang gagal sync.
+Central Excel `report.xlsx` berisi sheet:
+
+- `00_Dashboard`
+- `01_Run_Summary`
+- `02_Table_Sync_Status`
+- `03_Rowcount_Compare`
+- `04_Checksum_Result`
+- `05_Column_Structure_Diff`
+- `06_Index_Compare`
+- `07_View_SP_Sequence`
+- `08_LOB_Columns`
+- `09_Failed_Tables`
+- `10_Watermark`
+- `11_Checkpoint_Resume`
+- `12_Performance`
+- `13_Errors_Log`
+- `14_Config_Sanitized`
+
+`report.html` menampilkan total table, jumlah `MATCH`, `WARNING`, `MISMATCH`, `MISSING`, top table rowcount terbesar, column mismatch, rowcount mismatch, dependency terbesar, checksum mismatch, LOB summary, dan table yang gagal sync.
 
 ## Mode Sync
 
@@ -211,6 +232,7 @@ Oracle ke PostgreSQL memakai PostgreSQL `COPY FROM STDIN`. PostgreSQL ke Oracle 
 - Jangan aktifkan `truncate_cascade` tanpa approval DBA.
 - Exact count (`--exact-count`) memakai `SELECT COUNT(1)` dan bisa berat di table besar.
 - Untuk table besar, gunakan `fast_count: true` saat audit dan jalankan exact verification hanya saat window maintenance.
+- Audit type compatibility mengenali alias umum Oracle/PostgreSQL, termasuk `NUMBER`/`NUMERIC`, `VARCHAR2`/`varchar`, `CLOB`/`text`, `BLOB`/`bytea`, `DATE`/`timestamp`, `INTERVAL`/`interval`, `BOOLEAN`/`boolean`, `ROWID`/`text`, dan `JSON`/`jsonb`.
 - Log tidak mencetak password.
 
 ## Known Limitation
@@ -228,6 +250,14 @@ Test unit yang tidak butuh koneksi database:
 
 ```bash
 PYTHONPATH=. python -m unittest discover -s tests
+```
+
+Validasi command setelah install editable:
+
+```bash
+pip install -e ".[dev]"
+oracle-pg-sync-audit --help
+ops report latest --config config.yaml.example
 ```
 
 Integration check opsional untuk PostgreSQL container + fake Oracle MERGE:

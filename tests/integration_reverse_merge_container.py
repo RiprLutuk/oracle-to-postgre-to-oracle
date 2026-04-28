@@ -76,9 +76,10 @@ def _run_reverse_merge_probe(password: str) -> None:
     class FakeOracleCursor:
         def __init__(self):
             self.rows = []
-            self.statement = ""
+            self.statements = []
 
         def execute(self, query, params=None):
+            self.statements.append(str(query))
             if "ALL_TABLES" in query:
                 self._fetchone = ("SAMPLE",)
 
@@ -86,10 +87,18 @@ def _run_reverse_merge_probe(password: str) -> None:
             return getattr(self, "_fetchone", None)
 
         def executemany(self, statement, rows_arg):
-            self.statement = statement
+            self.statements.append(str(statement))
             self.rows = rows_arg
 
     fake = FakeOracleCursor()
+    oracle.truncate_table(fake, owner="APP", table="SAMPLE")
+    oracle.insert_rows(
+        fake,
+        owner="APP",
+        table="SAMPLE",
+        oracle_columns=["ID", "NAME"],
+        rows=rows,
+    )
     oracle.merge_rows(
         fake,
         owner="APP",
@@ -98,7 +107,10 @@ def _run_reverse_merge_probe(password: str) -> None:
         key_columns=["ID"],
         rows=rows,
     )
-    assert "MERGE INTO" in fake.statement
+    joined = "\n".join(fake.statements)
+    assert "TRUNCATE TABLE" in joined
+    assert "INSERT INTO" in joined
+    assert "MERGE INTO" in joined
     assert fake.rows == rows
 
 

@@ -25,7 +25,12 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -e ".[dev]"
+
+      - name: Verify editable CLI commands
+        run: |
+          oracle-pg-sync-audit --help
+          ops report latest --config config.yaml.example
 
       - name: Compile
         run: python -m compileall -q oracle_pg_sync tests

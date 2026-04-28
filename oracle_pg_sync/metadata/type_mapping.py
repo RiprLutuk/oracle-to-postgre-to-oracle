@@ -81,7 +81,7 @@ def is_type_compatible(oracle: ColumnMeta, postgres: ColumnMeta) -> tuple[bool, 
     odt = oracle.data_type.upper()
     pdt = pg_type_label(postgres).upper()
 
-    if odt in {"VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR"}:
+    if odt in {"VARCHAR", "VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR"}:
         if any(token in pdt for token in ("VARCHAR", "CHAR", "TEXT", "BPCHAR")):
             pg_len = _extract_length(pdt)
             ora_len = oracle.char_length or oracle.data_length
@@ -108,9 +108,9 @@ def is_type_compatible(oracle: ColumnMeta, postgres: ColumnMeta) -> tuple[bool, 
             precision = oracle.numeric_precision
             if precision is None:
                 return True, ""
-            if "SMALLINT" in pdt and precision <= 4:
+            if ("SMALLINT" in pdt or pdt == "INT2") and precision <= 4:
                 return True, ""
-            if ("INTEGER" in pdt or pdt == "INT4") and precision <= 9:
+            if ("INTEGER" in pdt or pdt in {"INT", "INT4"}) and precision <= 9:
                 return True, ""
             if ("BIGINT" in pdt or pdt == "INT8") and precision <= 18:
                 return True, ""
@@ -129,6 +129,16 @@ def is_type_compatible(oracle: ColumnMeta, postgres: ColumnMeta) -> tuple[bool, 
             return True, ""
         return False, f"Oracle {odt} vs PostgreSQL {pg_type_label(postgres)}"
 
+    if odt.startswith("INTERVAL"):
+        if "INTERVAL" in pdt:
+            return True, ""
+        return False, f"Oracle {odt} vs PostgreSQL {pg_type_label(postgres)}"
+
+    if odt == "BOOLEAN":
+        if "BOOL" in pdt:
+            return True, ""
+        return False, f"Oracle {odt} vs PostgreSQL {pg_type_label(postgres)}"
+
     if odt in {"RAW", "BLOB", "LONG RAW"}:
         if "BYTEA" in pdt:
             return True, ""
@@ -139,6 +149,16 @@ def is_type_compatible(oracle: ColumnMeta, postgres: ColumnMeta) -> tuple[bool, 
             return True, ""
         return False, f"Oracle {odt} vs PostgreSQL {pg_type_label(postgres)}"
 
+    if odt in {"ROWID", "UROWID"}:
+        if any(token in pdt for token in ("TEXT", "VARCHAR", "CHAR")):
+            return True, ""
+        return False, f"Oracle {odt} vs PostgreSQL {pg_type_label(postgres)}"
+
+    if odt in {"JSON", "XMLTYPE"}:
+        if any(token in pdt for token in ("JSON", "JSONB", "TEXT", "VARCHAR")):
+            return True, ""
+        return False, f"Oracle {odt} vs PostgreSQL {pg_type_label(postgres)}"
+
     if odt == pdt:
         return True, ""
     return False, f"Oracle {oracle_type_label(oracle)} vs PostgreSQL {pg_type_label(postgres)}"
@@ -146,7 +166,7 @@ def is_type_compatible(oracle: ColumnMeta, postgres: ColumnMeta) -> tuple[bool, 
 
 def suggested_pg_type(oracle: ColumnMeta) -> str:
     odt = oracle.data_type.upper()
-    if odt in {"VARCHAR2", "NVARCHAR2"}:
+    if odt in {"VARCHAR", "VARCHAR2", "NVARCHAR2"}:
         length = oracle.char_length or oracle.data_length
         return f"varchar({length})" if length else "varchar"
     if odt in {"CHAR", "NCHAR"}:
@@ -167,6 +187,10 @@ def suggested_pg_type(oracle: ColumnMeta) -> str:
         return f"numeric({precision},{scale})"
     if odt == "DATE" or odt.startswith("TIMESTAMP"):
         return "timestamp"
+    if odt.startswith("INTERVAL"):
+        return "interval"
+    if odt == "BOOLEAN":
+        return "boolean"
     if odt in {"FLOAT", "BINARY_FLOAT"}:
         return "real"
     if odt == "BINARY_DOUBLE":
@@ -174,6 +198,12 @@ def suggested_pg_type(oracle: ColumnMeta) -> str:
     if odt in {"RAW", "BLOB", "LONG RAW"}:
         return "bytea"
     if "CLOB" in odt or odt == "LONG":
+        return "text"
+    if odt in {"ROWID", "UROWID"}:
+        return "text"
+    if odt == "JSON":
+        return "jsonb"
+    if odt == "XMLTYPE":
         return "text"
     return "text"
 

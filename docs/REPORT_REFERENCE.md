@@ -59,6 +59,17 @@ Semua output masuk ke folder `reports/` kecuali diubah melalui `reports.output_d
 - Berisi run id, command, durasi, git commit, config hash, scope table, rows summary, checksum/lob summary, checkpoint path, report files, dan errors.
 - Password/secret tidak ditulis.
 
+`run_<timestamp>_<run_id>/report.xlsx`
+
+- Centralized Excel workbook untuk audit/sync run.
+- Sheet: `00_Dashboard`, `01_Run_Summary`, `02_Table_Sync_Status`, `03_Rowcount_Compare`, `04_Checksum_Result`, `05_Column_Structure_Diff`, `06_Index_Compare`, `07_View_SP_Sequence`, `08_LOB_Columns`, `09_Failed_Tables`, `10_Watermark`, `11_Checkpoint_Resume`, `12_Performance`, `13_Errors_Log`, `14_Config_Sanitized`.
+- Header frozen, auto-filter aktif, width kolom otomatis, dan status penting diberi warna.
+
+`run_<timestamp>_<run_id>/report.html`
+
+- Dashboard HTML per run.
+- Berisi link lokal ke `report.xlsx` dan `manifest.json`.
+
 `report.html`
 
 - Dashboard HTML untuk DBA.
