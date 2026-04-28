@@ -98,6 +98,7 @@ Audit metadata, rowcount, dependency:
 python -m oracle_pg_sync audit --config config.yaml
 python -m oracle_pg_sync audit --config config.yaml --tables sample_customer sample_order
 python -m oracle_pg_sync audit --config config.yaml --all-postgres-tables --fast-count
+python -m oracle_pg_sync audit-objects --config config.yaml
 python -m oracle_pg_sync audit --config config.yaml --suggest-drop --sql-out reports/schema_suggestions.sql
 ```
 

@@ -54,6 +54,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_args(report)
     report.add_argument("--tables", nargs="*", help="Tidak dipakai, disediakan agar konsisten")
 
+    objects = sub.add_parser("audit-objects", help="Compare schema objects seperti view, sequence, SP/function, trigger")
+    _add_common_args(objects)
+    objects.add_argument(
+        "--types",
+        nargs="*",
+        help="Object types. Default: view, materialized view, sequence, procedure, function, package, trigger, synonym",
+    )
+    objects.add_argument(
+        "--include-extension-objects",
+        action="store_true",
+        help="Include PostgreSQL extension-owned objects such as pg_trgm or pg_stat_statements",
+    )
+
     all_cmd = sub.add_parser("all", help="Audit, sync, audit ulang, lalu report")
     _add_common_args(all_cmd)
     all_cmd.add_argument("--tables", nargs="*", help="Override table list")
@@ -84,7 +97,7 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config)
-    if args.command in {"audit", "sync", "all"}:
+    if args.command in {"audit", "sync", "all", "audit-objects"}:
         _ensure_oracle_client_library_path(config, argv)
     report_dir = Path(config.reports.output_dir)
     logger = setup_logging(report_dir, logging.DEBUG if args.verbose else logging.INFO)
@@ -155,6 +168,25 @@ def main(argv: list[str] | None = None) -> int:
             sync_rows=sync_rows,
         )
         logger.info("HTML report dibuat: %s", report_dir / "report.html")
+        return 0
+
+    if args.command == "audit-objects":
+        from oracle_pg_sync.reports.writer_csv import write_csv
+
+        result = run_object_audit(
+            config,
+            logger,
+            object_types=getattr(args, "types", None),
+            include_extension_objects=args.include_extension_objects,
+        )
+        write_csv(report_dir / "object_inventory.csv", result.inventory_rows)
+        write_csv(report_dir / "object_compare.csv", result.compare_rows)
+        logger.info(
+            "Object audit selesai. MATCH=%s MISSING_IN_ORACLE=%s MISSING_IN_POSTGRES=%s",
+            _count(result.compare_rows, "MATCH"),
+            _count(result.compare_rows, "MISSING_IN_ORACLE"),
+            _count(result.compare_rows, "MISSING_IN_POSTGRES"),
+        )
         return 0
 
     if args.command == "all":
@@ -240,6 +272,32 @@ def run_audit(config: AppConfig, tables: list[str], logger: logging.Logger, *, w
                     )
 
     return AuditResult(inventory_rows, column_diff_rows, type_mismatch_rows, dependency_rows)
+
+
+def run_object_audit(
+    config: AppConfig,
+    logger: logging.Logger,
+    *,
+    object_types: list[str] | None = None,
+    include_extension_objects: bool = False,
+):
+    from oracle_pg_sync.db import oracle, postgres
+    from oracle_pg_sync.metadata.object_compare import ObjectAuditResult, compare_object_inventory, normalize_object_types
+
+    types = normalize_object_types(object_types)
+    logger.info("Audit schema objects types=%s", ",".join(sorted(types)))
+    with oracle.connect(config.oracle) as ocon, postgres.connect(config.postgres, autocommit=True) as pcon:
+        with ocon.cursor() as ocur, pcon.cursor() as pcur:
+            oracle_rows = oracle.schema_object_rows(ocur, config.oracle.schema, types)
+            postgres_rows = postgres.schema_object_rows(
+                pcur,
+                config.postgres.schema,
+                types,
+                include_extension_objects=include_extension_objects,
+            )
+    inventory_rows = oracle_rows + postgres_rows
+    compare_rows = compare_object_inventory(oracle_rows, postgres_rows)
+    return ObjectAuditResult(inventory_rows, compare_rows)
 
 
 def _audit_table_with_new_connections(

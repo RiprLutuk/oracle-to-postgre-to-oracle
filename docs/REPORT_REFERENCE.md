@@ -27,6 +27,17 @@ Semua output masuk ke folder `reports/` kecuali diubah melalui `reports.output_d
 - Object terkait table dari Oracle dan PostgreSQL.
 - Berisi view, procedure, function, package, atau dependency lain yang terdeteksi.
 
+`object_inventory.csv`
+
+- Inventory object schema dari `audit-objects`.
+- Berisi view, materialized view, sequence, procedure, function, package, trigger, synonym.
+
+`object_compare.csv`
+
+- Hasil compare object schema Oracle vs PostgreSQL dari `audit-objects`.
+- Status: `MATCH`, `MISSING_IN_ORACLE`, atau `MISSING_IN_POSTGRES`.
+- PostgreSQL extension-owned objects di-skip secara default; pakai `--include-extension-objects` jika perlu.
+
 `sync_result.csv`
 
 - Hasil command sync.

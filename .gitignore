@@ -20,6 +20,7 @@ reports/*.csv
 reports/*.xlsx
 reports/*.html
 reports/*.log
+reports/*.sql
 !reports/.gitkeep
 *.log
 *.pem

@@ -213,6 +213,147 @@ def dependency_rows(cur, schema: str, table: str) -> list[dict[str, Any]]:
     ]
 
 
+def schema_object_rows(
+    cur,
+    schema: str,
+    object_types: set[str],
+    *,
+    include_extension_objects: bool = False,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    class_extension_filter = (
+        ""
+        if include_extension_objects
+        else "AND NOT EXISTS (SELECT 1 FROM pg_depend dep WHERE dep.objid = c.oid AND dep.deptype = 'e')"
+    )
+    proc_extension_filter = (
+        ""
+        if include_extension_objects
+        else "AND NOT EXISTS (SELECT 1 FROM pg_depend dep WHERE dep.objid = p.oid AND dep.deptype = 'e')"
+    )
+    trigger_extension_filter = (
+        ""
+        if include_extension_objects
+        else "AND NOT EXISTS (SELECT 1 FROM pg_depend dep WHERE dep.objid = t.oid AND dep.deptype = 'e')"
+    )
+    if {"VIEW", "MATERIALIZED VIEW"} & object_types:
+        cur.execute(
+            f"""
+            SELECT n.nspname, c.relname,
+                   CASE c.relkind WHEN 'm' THEN 'MATERIALIZED VIEW' ELSE 'VIEW' END AS object_type
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s AND c.relkind IN ('v', 'm')
+            {class_extension_filter}
+            ORDER BY object_type, c.relname
+            """,
+            (schema,),
+        )
+        for object_schema, object_name, object_type in cur.fetchall():
+            if object_type in object_types:
+                rows.append(
+                    {
+                        "source_db": "postgres",
+                        "object_schema": object_schema,
+                        "object_type": object_type,
+                        "object_name": object_name,
+                        "parent_name": "",
+                        "status": "",
+                        "details": "",
+                    }
+                )
+    if "SEQUENCE" in object_types:
+        cur.execute(
+            f"""
+            SELECT schemaname, sequencename, start_value, min_value, max_value,
+                   increment_by, cycle, cache_size
+            FROM pg_sequences
+            WHERE schemaname = %s
+              AND (
+                  %s
+                  OR NOT EXISTS (
+                      SELECT 1
+                      FROM pg_class c
+                      JOIN pg_namespace n ON n.oid = c.relnamespace
+                      JOIN pg_depend dep ON dep.objid = c.oid AND dep.deptype = 'e'
+                      WHERE n.nspname = pg_sequences.schemaname
+                        AND c.relname = pg_sequences.sequencename
+                  )
+              )
+            ORDER BY sequencename
+            """,
+            (schema, include_extension_objects),
+        )
+        for row in cur.fetchall():
+            rows.append(
+                {
+                    "source_db": "postgres",
+                    "object_schema": row[0],
+                    "object_type": "SEQUENCE",
+                    "object_name": row[1],
+                    "parent_name": "",
+                    "status": "",
+                    "details": (
+                        f"start={row[2]};min={row[3]};max={row[4]};increment={row[5]};"
+                        f"cycle={row[6]};cache={row[7]}"
+                    ),
+                }
+            )
+    if {"FUNCTION", "PROCEDURE"} & object_types:
+        cur.execute(
+            f"""
+            SELECT n.nspname, p.proname,
+                   CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS object_type,
+                   pg_get_function_identity_arguments(p.oid) AS args
+            FROM pg_proc p
+            JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = %s AND p.prokind IN ('f', 'p')
+            {proc_extension_filter}
+            ORDER BY object_type, p.proname, args
+            """,
+            (schema,),
+        )
+        for object_schema, object_name, object_type, args in cur.fetchall():
+            if object_type in object_types:
+                rows.append(
+                    {
+                        "source_db": "postgres",
+                        "object_schema": object_schema,
+                        "object_type": object_type,
+                        "object_name": object_name,
+                        "parent_name": "",
+                        "status": "",
+                        "details": f"args={args or ''}",
+                    }
+                )
+    if "TRIGGER" in object_types:
+        cur.execute(
+            f"""
+            SELECT n.nspname, t.tgname, c.relname, pg_get_triggerdef(t.oid, true)
+            FROM pg_trigger t
+            JOIN pg_class c ON c.oid = t.tgrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s AND NOT t.tgisinternal
+            {trigger_extension_filter}
+            ORDER BY c.relname, t.tgname
+            """,
+            (schema,),
+        )
+        for object_schema, object_name, parent_name, trigger_def in cur.fetchall():
+            rows.append(
+                {
+                    "source_db": "postgres",
+                    "object_schema": object_schema,
+                    "object_type": "TRIGGER",
+                    "object_name": object_name,
+                    "parent_name": parent_name,
+                    "status": "",
+                    "details": trigger_def,
+                }
+            )
+    return rows
+
+
 def truncate_table(cur, schema: str, table: str, *, cascade: bool = False) -> None:
     stmt = sql.SQL("TRUNCATE TABLE {}{}").format(
         table_ident(schema, table),

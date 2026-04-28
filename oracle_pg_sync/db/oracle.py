@@ -217,6 +217,89 @@ def dependency_rows(cur, owner: str, tables: Iterable[str]) -> list[dict[str, An
     return result
 
 
+def schema_object_rows(cur, owner: str, object_types: set[str]) -> list[dict[str, Any]]:
+    owner_u = owner.upper()
+    rows: list[dict[str, Any]] = []
+    base_types = object_types - {"TRIGGER", "SEQUENCE"}
+    if base_types:
+        cur.execute(
+            """
+            SELECT OBJECT_TYPE, OBJECT_NAME, STATUS, LAST_DDL_TIME
+            FROM ALL_OBJECTS
+            WHERE OWNER = :owner
+              AND OBJECT_TYPE IN (
+                  'VIEW', 'MATERIALIZED VIEW', 'PROCEDURE', 'FUNCTION',
+                  'PACKAGE', 'PACKAGE BODY', 'SYNONYM'
+              )
+            ORDER BY OBJECT_TYPE, OBJECT_NAME
+            """,
+            {"owner": owner_u},
+        )
+        for object_type, object_name, status, last_ddl_time in cur.fetchall():
+            if object_type not in base_types:
+                continue
+            rows.append(
+                {
+                    "source_db": "oracle",
+                    "object_schema": owner_u,
+                    "object_type": object_type,
+                    "object_name": object_name,
+                    "parent_name": "",
+                    "status": status,
+                    "details": f"last_ddl_time={last_ddl_time}" if last_ddl_time else "",
+                }
+            )
+    if "SEQUENCE" in object_types:
+        cur.execute(
+            """
+            SELECT SEQUENCE_NAME, MIN_VALUE, MAX_VALUE, INCREMENT_BY, CYCLE_FLAG, ORDER_FLAG,
+                   CACHE_SIZE, LAST_NUMBER
+            FROM ALL_SEQUENCES
+            WHERE SEQUENCE_OWNER = :owner
+            ORDER BY SEQUENCE_NAME
+            """,
+            {"owner": owner_u},
+        )
+        for row in cur.fetchall():
+            rows.append(
+                {
+                    "source_db": "oracle",
+                    "object_schema": owner_u,
+                    "object_type": "SEQUENCE",
+                    "object_name": row[0],
+                    "parent_name": "",
+                    "status": "",
+                    "details": (
+                        f"min={row[1]};max={row[2]};increment={row[3]};cycle={row[4]};"
+                        f"order={row[5]};cache={row[6]};last={row[7]}"
+                    ),
+                }
+            )
+    if "TRIGGER" in object_types:
+        cur.execute(
+            """
+            SELECT TRIGGER_NAME, TABLE_NAME, STATUS, TRIGGERING_EVENT
+            FROM ALL_TRIGGERS
+            WHERE OWNER = :owner
+            ORDER BY TABLE_NAME, TRIGGER_NAME
+            """,
+            {"owner": owner_u},
+        )
+        for trigger_name, table_name, status, event in cur.fetchall():
+            rows.append(
+                {
+                    "source_db": "oracle",
+                    "object_schema": owner_u,
+                    "object_type": "TRIGGER",
+                    "object_name": trigger_name,
+                    "parent_name": table_name,
+                    "status": status,
+                    "details": f"event={event}",
+                }
+            )
+    return rows
+
+
 def select_rows(cur, owner: str, table: str, columns: list[tuple[str, str]], where: str | None = None):
     select_list = ", ".join(
         f"{qident(oracle_column.upper())} AS {qident(pg_column.upper())}"

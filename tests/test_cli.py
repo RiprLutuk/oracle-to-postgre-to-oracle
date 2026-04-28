@@ -53,6 +53,15 @@ tables:
         self.assertTrue(args.all_postgres_tables)
         self.assertEqual(args.limit, 10)
 
+    def test_audit_objects_command_accepts_types(self):
+        args = build_parser().parse_args(
+            ["audit-objects", "--types", "view", "sequence", "--include-extension-objects"]
+        )
+
+        self.assertEqual(args.command, "audit-objects")
+        self.assertEqual(args.types, ["view", "sequence"])
+        self.assertTrue(args.include_extension_objects)
+
 
 if __name__ == "__main__":
     unittest.main()

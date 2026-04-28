@@ -173,6 +173,14 @@ Untuk audit parallel, naikkan worker secara sadar karena setiap worker membuka k
 python -m oracle_pg_sync audit --config config.yaml --workers 4 --fast-count
 ```
 
+Untuk compare object schema seperti view, sequence, procedure/function, package, trigger:
+
+```bash
+python -m oracle_pg_sync audit-objects --config config.yaml
+python -m oracle_pg_sync audit-objects --config config.yaml --types view sequence procedure function trigger
+python -m oracle_pg_sync audit-objects --config config.yaml --include-extension-objects
+```
+
 ## 7. Baca Hasil Audit
 
 File utama:
