@@ -12,6 +12,15 @@ _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)(?::-(.*?))?\}")
 _SIZE_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*([KMGT]?I?B?)?\s*$", re.IGNORECASE)
 _LAST_ENV_FILE: Path | None = None
 _LAST_ENV_LOADED = False
+_OPTIONAL_ENV_DEFAULTS = {
+    "ORACLE_DSN": "",
+    "ORACLE_PORT": "1521",
+    "ORACLE_SERVICE_NAME": "",
+    "ORACLE_SID": "",
+    "ORACLE_SCHEMA": "",
+    "ORACLE_CLIENT_LIB_DIR": "",
+    "PG_SCHEMA": "public",
+}
 
 
 @dataclass
@@ -362,6 +371,8 @@ def _expand_env(value: Any) -> Any:
                 return os.environ[name]
             if default is not None:
                 return default
+            if name in _OPTIONAL_ENV_DEFAULTS:
+                return _OPTIONAL_ENV_DEFAULTS[name]
             raise RuntimeError(f"Environment variable {name} is not set. Check .env or export it.")
 
         return _ENV_PATTERN.sub(repl, value)

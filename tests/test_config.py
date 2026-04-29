@@ -57,6 +57,38 @@ postgres:
             finally:
                 os.chdir(cwd)
 
+    def test_optional_oracle_dsn_can_be_unset_when_host_is_used(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text(
+                """
+oracle:
+  dsn: ${ORACLE_DSN}
+  host: ${ORACLE_HOST}
+  port: ${ORACLE_PORT}
+  user: ${ORACLE_USER}
+  password: ${ORACLE_PASSWORD}
+postgres:
+  host: pg.local
+""",
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "ORACLE_HOST": "oracle.local",
+                    "ORACLE_USER": "app",
+                    "ORACLE_PASSWORD": "pw",
+                },
+                clear=True,
+            ):
+                config = load_config(path)
+
+        self.assertEqual(config.oracle.dsn, "")
+        self.assertEqual(config.oracle.host, "oracle.local")
+        self.assertEqual(config.oracle.port, "1521")
+
     def test_custom_env_file_is_loaded(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

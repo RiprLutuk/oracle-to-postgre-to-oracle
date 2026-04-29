@@ -19,18 +19,19 @@ Optional dotenv file loaded before config expansion.
 
 ```yaml
 oracle:
-  dsn: ${ORACLE_DSN}
+  dsn: ${ORACLE_DSN:-}
   host: ${ORACLE_HOST}
-  port: ${ORACLE_PORT}
-  service_name: ${ORACLE_SERVICE_NAME}
-  sid: ${ORACLE_SID}
+  port: ${ORACLE_PORT:-1521}
+  service_name: ${ORACLE_SERVICE_NAME:-}
+  sid: ${ORACLE_SID:-}
   user: ${ORACLE_USER}
   password: ${ORACLE_PASSWORD}
-  schema: ${ORACLE_SCHEMA}
-  client_lib_dir: ${ORACLE_CLIENT_LIB_DIR}
+  schema: ${ORACLE_SCHEMA:-}
+  client_lib_dir: ${ORACLE_CLIENT_LIB_DIR:-}
 ```
 
 Use `dsn` directly or let the tool build a DSN from host/port plus service or SID.
+`ORACLE_DSN` is optional when `ORACLE_HOST` is used.
 
 ### `postgres`
 
