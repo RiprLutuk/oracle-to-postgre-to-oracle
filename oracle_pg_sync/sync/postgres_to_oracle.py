@@ -13,7 +13,7 @@ from oracle_pg_sync.lob import apply_lob_mapping_policy, lob_summary_to_fields
 from oracle_pg_sync.metadata.compare import compare_table_metadata, inventory_has_fatal_mismatch
 from oracle_pg_sync.metadata.oracle_metadata import fetch_table_metadata as fetch_oracle_metadata
 from oracle_pg_sync.metadata.postgres_metadata import fetch_table_metadata as fetch_pg_metadata
-from oracle_pg_sync.sync.runtime import DirectSyncExecutionContext, SyncExecutionContext
+from oracle_pg_sync.sync.runtime import DirectSyncExecutionContext, SyncExecutionContext, create_sync_execution_context
 from oracle_pg_sync.utils.naming import split_schema_table
 from oracle_pg_sync.validation import checksum_columns, checksum_result_row, stable_cursor_hash
 
@@ -104,7 +104,7 @@ class PostgresToOracleSync:
                 source_db=self.config.postgres.schema,
                 target_db=self.config.oracle.schema,
             )
-        execution_context = SyncExecutionContext(self.config, self.logger)
+        execution_context = create_sync_execution_context(self.config, self.logger)
         table_order = {
             self.config.resolve_table_name(name, strict=False): index
             for index, name in enumerate(tables)

@@ -10,7 +10,7 @@ from oracle_pg_sync.config import PostgresConfig, validate_postgres_config
 
 try:
     from psycopg_pool import ConnectionPool
-except ModuleNotFoundError:
+except ImportError:
     ConnectionPool = None
 
 

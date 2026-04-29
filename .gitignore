@@ -35,3 +35,6 @@ local/private/
 *.wallet
 tnsnames.ora
 sqlnet.ora
+vendor/oracle/*.zip
+vendor/oracle/META-INF/
+vendor/oracle/instantclient_*/

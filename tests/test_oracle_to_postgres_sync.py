@@ -158,7 +158,7 @@ class OracleToPostgresSyncTest(unittest.TestCase):
             )
         )
 
-        with patch("oracle_pg_sync.sync.oracle_to_postgres.SyncExecutionContext", return_value=FakeExecutionContext()), patch.object(
+        with patch("oracle_pg_sync.sync.oracle_to_postgres.create_sync_execution_context", return_value=FakeExecutionContext()), patch.object(
             OracleToPostgresSync,
             "sync_table",
             new=fake_sync_table,

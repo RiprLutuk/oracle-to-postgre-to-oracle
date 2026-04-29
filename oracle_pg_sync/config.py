@@ -447,6 +447,11 @@ def load_config(path: str | Path = "config.yaml", *, env_file: str | Path | None
 
     raw = _expand_env(raw_pre_env)
     oracle = OracleConfig(**(raw.get("oracle") or {}))
+    if oracle.client_lib_dir:
+        client_lib_path = Path(oracle.client_lib_dir).expanduser()
+        if not client_lib_path.is_absolute():
+            client_lib_path = (config_path.parent / client_lib_path).resolve()
+        oracle.client_lib_dir = str(client_lib_path)
     postgres = PostgresConfig(**(raw.get("postgres") or {}))
     sync_raw = raw.get("sync") or {}
     if "max_swap_table_bytes" in sync_raw:

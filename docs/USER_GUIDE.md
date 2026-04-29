@@ -39,6 +39,11 @@ cp config.yaml.example config.yaml
 
 Put secrets only in `.env`. Do not commit `.env`, `config.yaml`, or real table lists.
 
+If your Oracle account requires Thick mode, install Oracle Instant Client in a
+project-local folder such as `vendor/oracle/instantclient_23_26` and set
+`ORACLE_CLIENT_LIB_DIR` in `.env`. See
+[Oracle Client Install](ORACLE_CLIENT_INSTALL.md).
+
 ## Environment Configuration
 
 `.env` is loaded automatically for every `ops` and `oracle-pg-sync-audit` command. You do not need to manually `export` variables before running the tool.

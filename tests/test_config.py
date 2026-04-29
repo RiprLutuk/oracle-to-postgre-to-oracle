@@ -216,6 +216,27 @@ sync:
         self.assertEqual(config.sync.max_db_connections, 6)
         self.assertTrue(config.sync.respect_dependencies)
 
+    def test_oracle_client_lib_dir_is_resolved_relative_to_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            client_dir = root / "vendor" / "oracle" / "instantclient_23_9"
+            client_dir.mkdir(parents=True)
+            path = root / "config.yaml"
+            path.write_text(
+                """
+oracle:
+  schema: APP
+  client_lib_dir: vendor/oracle/instantclient_23_9
+postgres:
+  schema: public
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(path)
+
+        self.assertEqual(config.oracle.client_lib_dir, str(client_dir.resolve()))
+
     def test_load_rich_lob_strategy_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "config.yaml"

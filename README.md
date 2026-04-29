@@ -18,7 +18,7 @@ modular.
   incremental sync, checksum validation, LOB strategy, run manifest, dan CI.
 - [Report Reference](docs/REPORT_REFERENCE.md): arti setiap file report dan cara membaca status `MATCH`, `WARNING`, `MISMATCH`, `MISSING`.
 - [Troubleshooting](docs/TROUBLESHOOTING.md): error umum Oracle, PostgreSQL, dependency, rowcount, dan sync.
-- [Oracle Client Install](docs/ORACLE_CLIENT_INSTALL.md): cara install Oracle Instant Client 23.9 untuk thick mode.
+- [Oracle Client Install](docs/ORACLE_CLIENT_INSTALL.md): cara download dan pasang Oracle Instant Client project-local untuk thick mode.
 - [Developer Guide](docs/DEVELOPER_GUIDE.md): struktur kode, test, dan cara menambah fitur.
 
 ## Tujuan
@@ -67,8 +67,9 @@ pip install -e ".[dev]"
 ```
 
 Jika memakai Oracle Instant Client thick mode, ikuti
-[Oracle Client Install](docs/ORACLE_CLIENT_INSTALL.md), lalu isi
-`ORACLE_CLIENT_LIB_DIR` di `.env`.
+[Oracle Client Install](docs/ORACLE_CLIENT_INSTALL.md). Repo ini mendukung
+layout project-local seperti `vendor/oracle/instantclient_23_26`, jadi tidak
+harus bergantung pada `/opt/oracle/...` di mesin tertentu.
 
 ## Setup Config
 

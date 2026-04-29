@@ -17,7 +17,7 @@ from oracle_pg_sync.metadata.compare import compare_table_metadata, inventory_ha
 from oracle_pg_sync.metadata.oracle_metadata import fetch_table_metadata as fetch_oracle_metadata
 from oracle_pg_sync.metadata.postgres_metadata import fetch_table_metadata as fetch_pg_metadata
 from oracle_pg_sync.sync.copy_loader import CopyMetrics, copy_rows
-from oracle_pg_sync.sync.runtime import DirectSyncExecutionContext, SyncExecutionContext
+from oracle_pg_sync.sync.runtime import DirectSyncExecutionContext, SyncExecutionContext, create_sync_execution_context
 from oracle_pg_sync.sync.staging import atomic_swap, create_backup_table, create_staging_like, drop_table
 from oracle_pg_sync.utils.naming import oracle_name, split_schema_table
 from oracle_pg_sync.validation import checksum_columns, checksum_result_row, stable_cursor_hash
@@ -187,7 +187,7 @@ class OracleToPostgresSync:
                 job_name=self.config.job.name,
                 mode=mode_override or self.config.sync.default_mode,
             )
-        execution_context = SyncExecutionContext(self.config, self.logger)
+        execution_context = create_sync_execution_context(self.config, self.logger)
         table_order = {
             self.config.resolve_table_name(name, strict=False): index
             for index, name in enumerate(tables)
