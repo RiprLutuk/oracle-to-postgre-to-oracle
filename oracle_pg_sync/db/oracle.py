@@ -296,10 +296,15 @@ def dependency_rows(cur, owner: str, tables: Iterable[str]) -> list[dict[str, An
         table_u = resolve_table_name(cur, owner, table) or oracle_name(table)
         cur.execute(
             """
-            SELECT OWNER, NAME, TYPE, REFERENCED_OWNER, REFERENCED_NAME, REFERENCED_TYPE
-            FROM ALL_DEPENDENCIES
-            WHERE REFERENCED_OWNER = :owner AND REFERENCED_NAME = :tbl
-            ORDER BY OWNER, TYPE, NAME
+            SELECT d.OWNER, d.NAME, d.TYPE, d.REFERENCED_OWNER, d.REFERENCED_NAME,
+                   d.REFERENCED_TYPE, o.STATUS
+            FROM ALL_DEPENDENCIES d
+            LEFT JOIN ALL_OBJECTS o
+              ON o.OWNER = d.OWNER
+             AND o.OBJECT_NAME = d.NAME
+             AND o.OBJECT_TYPE = d.TYPE
+            WHERE d.REFERENCED_OWNER = :owner AND d.REFERENCED_NAME = :tbl
+            ORDER BY d.OWNER, d.TYPE, d.NAME
             """,
             {"owner": owner_u, "tbl": table_u},
         )
@@ -314,6 +319,7 @@ def dependency_rows(cur, owner: str, tables: Iterable[str]) -> list[dict[str, An
                     "referenced_schema": row[3],
                     "referenced_name": row[4],
                     "referenced_type": row[5],
+                    "status": row[6] or "",
                 }
             )
     return result

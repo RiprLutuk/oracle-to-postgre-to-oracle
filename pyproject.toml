@@ -19,8 +19,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "bandit>=1.7.10",
   "openpyxl>=3.1.5",
   "pytest>=8.3.4",
+  "ruff>=0.8.0",
 ]
 
 [project.scripts]
@@ -33,3 +35,9 @@ include = ["oracle_pg_sync*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+line-length = 140
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]

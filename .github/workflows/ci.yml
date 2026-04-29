@@ -38,6 +38,12 @@ jobs:
       - name: Compile
         run: python -m compileall -q oracle_pg_sync tests
 
+      - name: Lint
+        run: ruff check oracle_pg_sync tests
+
+      - name: Security scan
+        run: bandit -q -r oracle_pg_sync -lll
+
       - name: Smoke tests
         run: python -m unittest tests.test_ops_smoke
 

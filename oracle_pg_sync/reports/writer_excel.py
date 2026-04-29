@@ -30,6 +30,7 @@ def write_central_report_xlsx(
     checksum_rows: list[dict] | None = None,
     lob_rows: list[dict] | None = None,
     dependency_rows: list[dict] | None = None,
+    dependency_summary_rows: list[dict] | None = None,
     maintenance_rows: list[dict] | None = None,
     watermark_rows: list[dict] | None = None,
     checkpoint_rows: list[dict] | None = None,
@@ -43,6 +44,7 @@ def write_central_report_xlsx(
     checksum_rows = checksum_rows or []
     lob_rows = lob_rows or [row for row in sync_rows if row.get("lob_columns_detected") or row.get("lob_type")]
     dependency_rows = dependency_rows or []
+    dependency_summary_rows = dependency_summary_rows or []
     maintenance_rows = maintenance_rows or []
     watermark_rows = watermark_rows or []
     checkpoint_rows = checkpoint_rows or []
@@ -50,17 +52,14 @@ def write_central_report_xlsx(
     rowcount_rows = _rowcount_rows(sync_rows, inventory_rows)
     error_rows = _error_rows(sync_rows, maintenance_rows)
     sheets = {
-        "00_Dashboard": [_dashboard_row(table_status_rows, checksum_rows, watermark_rows, checkpoint_rows)],
+        "00_Dashboard": [_dashboard_row(table_status_rows, checksum_rows, watermark_rows, checkpoint_rows, lob_rows)],
         "01_Run_Summary": [_run_summary_row(table_status_rows, checksum_rows, watermark_rows, checkpoint_rows)],
         "02_Table_Sync_Status": table_status_rows,
         "03_Rowcount_Compare": rowcount_rows,
         "04_Checksum_Result": checksum_rows,
         "05_Column_Diff": column_diff_rows + type_mismatch_rows,
         "06_Index_Compare": _filter_dependency_rows(dependency_rows, {"INDEX"}),
-        "07_Object_Dependency": _filter_dependency_rows(
-            dependency_rows,
-            {"VIEW", "MATERIALIZED VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE"},
-        ),
+        "07_Object_Dependency": _object_dependency_sheet_rows(dependency_rows, dependency_summary_rows),
         "08_LOB_Columns": lob_rows,
         "09_Failed_Tables": [row for row in table_status_rows if str(row.get("status", "")).upper() in {"FAILED", "MISMATCH", "MISSING"}],
         "10_Watermark": watermark_rows,
@@ -82,7 +81,9 @@ def _dashboard_row(
     checksum_rows: list[dict],
     watermark_rows: list[dict],
     checkpoint_rows: list[dict],
+    lob_rows: list[dict] | None = None,
 ) -> dict[str, Any]:
+    lob_rows = lob_rows or []
     return {
         "total_tables": len(table_rows),
         "success": sum(1 for row in table_rows if str(row.get("status", "")).upper() in {"SUCCESS", "MATCH"}),
@@ -92,6 +93,8 @@ def _dashboard_row(
         "rows_processed": sum(int(row.get("rows_loaded") or 0) for row in table_rows),
         "watermark_updates": len(watermark_rows),
         "resume_usage": sum(1 for row in checkpoint_rows if row.get("chunk_key") or row.get("status")),
+        "lob_heavy_tables": sum(1 for row in lob_rows if str(row.get("classification", "")).upper() == "LOB-HEAVY"),
+        "slow_tables": sum(1 for row in table_rows if float(row.get("elapsed_seconds") or 0) >= 300),
     }
 
 
@@ -124,6 +127,17 @@ def _rowcount_rows(sync_rows: list[dict], inventory_rows: list[dict]) -> list[di
 
 def _filter_dependency_rows(rows: list[dict], object_types: set[str]) -> list[dict]:
     return [row for row in rows if str(row.get("object_type", "")).upper() in object_types]
+
+
+def _object_dependency_sheet_rows(dependency_rows: list[dict], summary_rows: list[dict]) -> list[dict]:
+    detail_rows = _filter_dependency_rows(
+        dependency_rows,
+        {"VIEW", "MATERIALIZED VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE"},
+    )
+    return [
+        {"row_type": "summary", **row}
+        for row in summary_rows
+    ] + [{"row_type": "detail", **row} for row in detail_rows]
 
 
 def _performance_rows(sync_rows: list[dict]) -> list[dict]:

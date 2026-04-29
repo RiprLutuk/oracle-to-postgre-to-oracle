@@ -14,6 +14,7 @@ from pathlib import Path
 
 from oracle_pg_sync.checkpoint import CheckpointStore, new_run_id
 from oracle_pg_sync.config import AppConfig, TableConfig, load_config
+from oracle_pg_sync.dependency_health import critical_dependency_rows, summarize_dependency_rows
 from oracle_pg_sync.manifest import RunManifest
 from oracle_pg_sync.manifest import sanitize
 from oracle_pg_sync.utils.logging import setup_logging
@@ -309,12 +310,16 @@ def main(argv: list[str] | None = None) -> int:
             execute=args.execute,
         )
         dependency_post_rows = _write_dependency_report(config, tables, logger, run_dir, phase="post")
+        dependency_rows = dependency_pre_rows + dependency_post_rows
+        dependency_summary_rows = _write_dependency_summary(run_dir, dependency_rows, maintenance_rows)
+        dependency_failed = _dependency_failed(config, dependency_rows + maintenance_rows)
         _write_run_reports(
             manifest,
             report_dir=report_dir,
             sync_rows=rows,
             checksum_rows=checksum_rows,
-            dependency_rows=dependency_pre_rows + dependency_post_rows,
+            dependency_rows=dependency_rows,
+            dependency_summary_rows=dependency_summary_rows,
             maintenance_rows=maintenance_rows,
             watermark_rows=checkpoint_store.list_watermarks(),
             checkpoint_rows=checkpoint_store.list_chunks(run_id),
@@ -326,6 +331,7 @@ def main(argv: list[str] | None = None) -> int:
             result_rows=rows,
             checksum_rows=checksum_rows,
             lob_rows=rows,
+            dependency_rows=dependency_summary_rows,
             report_files=_run_report_files(
                 run_dir,
                 "sync_result.csv",
@@ -335,6 +341,7 @@ def main(argv: list[str] | None = None) -> int:
                 "dependency_pre.csv",
                 "dependency_post.csv",
                 "dependency_maintenance.csv",
+                "dependency_summary.csv",
                 "report.xlsx",
                 "report.html",
                 "logs.txt",
@@ -343,7 +350,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Manifest dibuat: %s", manifest_path)
         logger.info("Sync selesai. SUCCESS=%s FAILED=%s SKIPPED=%s DRY_RUN=%s",
                     _count(rows, "SUCCESS"), _count(rows, "FAILED"), _count(rows, "SKIPPED"), _count(rows, "DRY_RUN"))
-        return 1 if any(row["status"] == "FAILED" for row in rows) else 0
+        return 1 if dependency_failed or any(row["status"] == "FAILED" for row in rows) else 0
 
     if args.command == "report":
         from oracle_pg_sync.reports.writer_html import write_html_report
@@ -355,6 +362,7 @@ def main(argv: list[str] | None = None) -> int:
         checksum_rows = _read_csv(source_dir / "validation_checksum.csv")
         dependency_rows = _read_csv(source_dir / "dependency_pre.csv") + _read_csv(source_dir / "dependency_post.csv")
         maintenance_rows = _read_csv(source_dir / "dependency_maintenance.csv")
+        dependency_summary_rows = _read_csv(source_dir / "dependency_summary.csv")
         write_html_report(
             source_dir / "report.html",
             inventory_rows=inventory_rows,
@@ -362,6 +370,7 @@ def main(argv: list[str] | None = None) -> int:
             sync_rows=sync_rows,
             checksum_rows=checksum_rows,
             dependency_rows=dependency_rows,
+            dependency_summary_rows=dependency_summary_rows,
             maintenance_rows=maintenance_rows,
         )
         logger.info("HTML report dibuat: %s", source_dir / "report.html")
@@ -426,10 +435,12 @@ def main(argv: list[str] | None = None) -> int:
         rows = run_table_dependency_audit(config, tables, logger)
         out_path = Path(args.out) if args.out else run_dir / "table_object_dependencies.csv"
         write_csv(out_path, rows)
+        summary_rows = _write_dependency_summary(run_dir, rows, [])
         _copy_log_to_run_dir(report_dir, run_dir)
         manifest_path = manifest.finish(
             result_rows=rows,
-            report_files=[str(out_path), *_run_report_files(run_dir, "logs.txt")],
+            dependency_rows=summary_rows,
+            report_files=[str(out_path), *_run_report_files(run_dir, "dependency_summary.csv", "logs.txt")],
         )
         logger.info("Manifest dibuat: %s", manifest_path)
         logger.info("Dependency audit selesai. ROWS=%s OUT=%s", len(rows), out_path)
@@ -489,6 +500,9 @@ def main(argv: list[str] | None = None) -> int:
             execute=args.execute,
         )
         dependency_post_rows = _write_dependency_report(config, tables, logger, run_dir, phase="post")
+        dependency_rows = dependency_pre_rows + dependency_post_rows
+        dependency_summary_rows = _write_dependency_summary(run_dir, dependency_rows, maintenance_rows)
+        dependency_failed = _dependency_failed(config, dependency_rows + maintenance_rows)
         logger.info("Step 3/3 audit ulang dan report")
         audit_result = run_audit(config, tables, logger, workers=args.workers)
         write_audit_reports(
@@ -509,7 +523,8 @@ def main(argv: list[str] | None = None) -> int:
             type_mismatch_rows=audit_result.type_mismatch_rows,
             sync_rows=sync_rows,
             checksum_rows=checksum_rows,
-            dependency_rows=dependency_pre_rows + dependency_post_rows + audit_result.dependency_rows,
+            dependency_rows=dependency_rows + audit_result.dependency_rows,
+            dependency_summary_rows=dependency_summary_rows,
             maintenance_rows=maintenance_rows,
             watermark_rows=checkpoint_store.list_watermarks(),
             checkpoint_rows=checkpoint_store.list_chunks(run_id),
@@ -521,6 +536,7 @@ def main(argv: list[str] | None = None) -> int:
             result_rows=sync_rows,
             checksum_rows=checksum_rows,
             lob_rows=sync_rows,
+            dependency_rows=dependency_summary_rows,
             report_files=_run_report_files(
                 run_dir,
                 "pre_inventory_summary.csv",
@@ -538,6 +554,7 @@ def main(argv: list[str] | None = None) -> int:
                 "dependency_pre.csv",
                 "dependency_post.csv",
                 "dependency_maintenance.csv",
+                "dependency_summary.csv",
                 "schema_suggestions.sql",
                 "report.xlsx",
                 "report.html",
@@ -545,7 +562,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
         logger.info("Manifest dibuat: %s", manifest_path)
-        return 1 if any(row["status"] == "FAILED" for row in sync_rows) else 0
+        return 1 if dependency_failed or any(row["status"] == "FAILED" for row in sync_rows) else 0
 
     return 2
 
@@ -913,6 +930,22 @@ def _write_dependency_report(
     return rows
 
 
+def _write_dependency_summary(
+    report_dir: Path,
+    dependency_rows: list[dict],
+    maintenance_rows: list[dict],
+) -> list[dict]:
+    from oracle_pg_sync.reports.writer_csv import write_csv
+
+    rows = summarize_dependency_rows(dependency_rows, maintenance_rows)
+    write_csv(report_dir / "dependency_summary.csv", rows)
+    return rows
+
+
+def _dependency_failed(config: AppConfig, rows: list[dict]) -> bool:
+    return bool(config.dependency.fail_on_broken_dependency and critical_dependency_rows(rows))
+
+
 def _run_dependency_maintenance(
     config: AppConfig,
     tables: list[str],
@@ -1026,6 +1059,7 @@ def _write_run_reports(
     sync_rows: list[dict],
     checksum_rows: list[dict],
     dependency_rows: list[dict] | None = None,
+    dependency_summary_rows: list[dict] | None = None,
     maintenance_rows: list[dict] | None = None,
     watermark_rows: list[dict] | None = None,
     checkpoint_rows: list[dict] | None = None,
@@ -1043,6 +1077,7 @@ def _write_run_reports(
         sync_rows=sync_rows,
         checksum_rows=checksum_rows,
         dependency_rows=dependency_rows or [],
+        dependency_summary_rows=dependency_summary_rows or [],
         maintenance_rows=maintenance_rows or [],
         watermark_rows=watermark_rows or [],
         checkpoint_rows=checkpoint_rows or [],
@@ -1055,6 +1090,7 @@ def _write_run_reports(
         sync_rows=sync_rows,
         checksum_rows=checksum_rows,
         dependency_rows=dependency_rows or [],
+        dependency_summary_rows=dependency_summary_rows or [],
         maintenance_rows=maintenance_rows or [],
     )
     _copy_log_to_run_dir(report_dir, run_dir)

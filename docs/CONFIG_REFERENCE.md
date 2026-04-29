@@ -210,6 +210,27 @@ Syntax `${PG_SCHEMA:-public}` berarti kalau env kosong, pakai `public`.
 
 - Placeholder untuk format null COPY.
 
+## dependency
+
+`auto_recompile_oracle`
+
+- Jika `true`, execute sync menjalankan compile invalid object Oracle setelah load.
+
+`refresh_postgres_mview`
+
+- Jika `true`, execute sync menjalankan refresh materialized view PostgreSQL
+  yang terdeteksi dependent.
+
+`max_recompile_attempts`
+
+- Batas loop compile invalid object Oracle.
+- Default `3`.
+
+`fail_on_broken_dependency`
+
+- Jika `true`, run execute keluar non-zero bila dependency critical masih
+  broken, invalid, missing, atau failed setelah dependency lifecycle.
+
 `pg_lock_timeout`
 
 - PostgreSQL lock timeout untuk action yang butuh lock, terutama `truncate`.

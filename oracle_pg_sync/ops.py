@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import sys
+import logging
 from pathlib import Path
 
 from oracle_pg_sync.checkpoint import CheckpointStore
@@ -96,11 +97,13 @@ def _doctor(args: list[str]) -> int:
     if offline:
         rows.append(("oracle_connection", "WARNING", "skipped by --offline"))
         rows.append(("postgres_connection", "WARNING", "skipped by --offline"))
+        rows.append(("dependency_health", "WARNING", "skipped by --offline"))
         _print_check_rows(rows)
         return 1 if critical else 0
 
     rows.append(_check_oracle(config))
     rows.extend(_check_postgres(config))
+    rows.append(_check_dependency_health(config))
     critical = critical or any(row[1] == "ERROR" for row in rows)
     _print_check_rows(rows)
     return 1 if critical else 0
@@ -132,7 +135,13 @@ def _analyze(args: list[str]) -> int:
 
 def _repair_dependencies(args: list[str]) -> int:
     from oracle_pg_sync.checkpoint import new_run_id
-    from oracle_pg_sync.cli import _resolve_tables, _run_dependency_maintenance, _write_dependency_report
+    from oracle_pg_sync.cli import (
+        _dependency_failed,
+        _resolve_tables,
+        _run_dependency_maintenance,
+        _write_dependency_report,
+        _write_dependency_summary,
+    )
     from oracle_pg_sync.manifest import RunManifest, sanitize
     from oracle_pg_sync.reports.writer_excel import write_central_report_xlsx
     from oracle_pg_sync.reports.writer_html import write_html_report
@@ -167,9 +176,12 @@ def _repair_dependencies(args: list[str]) -> int:
     pre_rows = _write_dependency_report(config, tables, logger, run_dir, phase="pre")
     maintenance_rows = _run_dependency_maintenance(config, tables, logger, run_dir, pre_rows, execute=True)
     post_rows = _write_dependency_report(config, tables, logger, run_dir, phase="post")
+    dependency_rows = pre_rows + post_rows
+    summary_rows = _write_dependency_summary(run_dir, dependency_rows, maintenance_rows)
     write_central_report_xlsx(
         run_dir / "report.xlsx",
-        dependency_rows=pre_rows + post_rows,
+        dependency_rows=dependency_rows,
+        dependency_summary_rows=summary_rows,
         maintenance_rows=maintenance_rows,
         config_sanitized=sanitize(config),
     )
@@ -177,24 +189,23 @@ def _repair_dependencies(args: list[str]) -> int:
         run_dir / "report.html",
         inventory_rows=[],
         column_diff_rows=[],
-        dependency_rows=pre_rows + post_rows,
+        dependency_rows=dependency_rows,
+        dependency_summary_rows=summary_rows,
         maintenance_rows=maintenance_rows,
     )
     manifest.finish(
         result_rows=maintenance_rows,
+        dependency_rows=summary_rows,
         report_files=[
             str(run_dir / "dependency_pre.csv"),
             str(run_dir / "dependency_post.csv"),
             str(run_dir / "dependency_maintenance.csv"),
+            str(run_dir / "dependency_summary.csv"),
             str(run_dir / "report.xlsx"),
             str(run_dir / "report.html"),
         ],
     )
-    failed = any(
-        str(row.get("maintenance_status") or row.get("compile_status") or row.get("validation_status")).lower()
-        in {"failed", "missing"}
-        for row in maintenance_rows
-    )
+    failed = _dependency_failed(config, dependency_rows + maintenance_rows)
     print(f"report_path,{run_dir / 'report.html'}")
     return 1 if failed else 0
 
@@ -306,6 +317,23 @@ def _check_postgres(config) -> list[tuple[str, str, str]]:
             ("postgres_pgcrypto", "WARNING", "skipped"),
             ("postgres_privileges", "WARNING", "skipped"),
         ]
+
+
+def _check_dependency_health(config) -> tuple[str, str, str]:
+    try:
+        from oracle_pg_sync.cli import run_table_dependency_audit
+        from oracle_pg_sync.dependency_health import critical_dependency_rows
+
+        tables = config.table_names()[:10]
+        if not tables:
+            return ("dependency_health", "WARNING", "no configured tables")
+        rows = run_table_dependency_audit(config, tables, logging.getLogger("ops.doctor"))
+        broken = len(critical_dependency_rows(rows))
+        if broken:
+            return ("dependency_health", "ERROR", f"{broken} broken dependency rows in first {len(tables)} tables")
+        return ("dependency_health", "OK", f"checked first {len(tables)} tables")
+    except Exception as exc:
+        return ("dependency_health", "WARNING", str(exc))
 
 
 def _print_check_rows(rows: list[tuple[str, str, str]]) -> None:

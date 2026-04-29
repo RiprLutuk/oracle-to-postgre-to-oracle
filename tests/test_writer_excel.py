@@ -23,6 +23,7 @@ class WriterExcelTest(unittest.TestCase):
                 sync_rows=[{"table_name": "public.sample", "status": "SUCCESS", "rows_loaded": 10, "elapsed_seconds": 2}],
                 checksum_rows=[{"table_name": "public.sample", "chunk_key": "table", "status": "MATCH"}],
                 dependency_rows=[{"table_name": "public.sample", "object_type": "VIEW", "object_name": "sample_v"}],
+                dependency_summary_rows=[{"table_name": "public.sample", "broken_count": 0}],
                 watermark_rows=[{"table_name": "public.sample", "value": "10"}],
                 checkpoint_rows=[{"table_name": "public.sample", "chunk_key": "full", "status": "success"}],
                 config_sanitized={"oracle": {"password": "****"}},
@@ -52,6 +53,7 @@ class WriterExcelTest(unittest.TestCase):
         )
         self.assertEqual(workbook["00_Dashboard"].freeze_panes, "A2")
         self.assertIsNotNone(workbook["04_Checksum_Result"].auto_filter.ref)
+        self.assertEqual(workbook["07_Object_Dependency"]["A2"].value, "summary")
 
     def test_long_cell_values_are_truncated_before_openpyxl_warning(self):
         from oracle_pg_sync.reports.writer_excel import EXCEL_CELL_MAX_CHARS, write_central_report_xlsx

@@ -29,6 +29,13 @@ checkpoint, lock, log runtime global, dan kumpulan run folder.
 - Object terkait table dari Oracle dan PostgreSQL.
 - Berisi view, procedure, function, package, atau dependency lain yang terdeteksi.
 
+`run_<timestamp>_<run_id>/dependency_summary.csv`
+
+- Ringkasan dependency per phase/source/table.
+- Berisi `object_count`, `broken_count`, `invalid_count`, `missing_count`,
+  dan `failed_count`.
+- Dipakai oleh manifest, `report.xlsx`, dan `report.html` untuk dependency health.
+
 `run_<timestamp>_<run_id>/object_inventory.csv`
 
 - Inventory object schema dari `audit-objects`.
@@ -77,7 +84,8 @@ Sheet:
 - `04_Checksum_Result`: hasil checksum table/chunk.
 - `05_Column_Diff`: missing/extra/ordinal/type mismatch.
 - `06_Index_Compare`: dependency/index rows yang terdeteksi.
-- `07_Object_Dependency`: view, materialized view, procedure, function, package, dan sequence dependency.
+- `07_Object_Dependency`: dependency summary plus view, materialized view,
+  procedure, function, package, dan sequence dependency.
 - `08_LOB_Columns`: kolom LOB dari sync atau `ops analyze lob`, strategy,
   target type, validation mode, classification, warning, dan recommendation.
 - `09_Failed_Tables`: table dengan status `FAILED`, `MISMATCH`, atau `MISSING`.

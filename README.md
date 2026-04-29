@@ -273,6 +273,7 @@ Untuk reverse upsert, `key_columns` bisa berasal dari config atau command `--key
   `ops doctor`, `ops dependencies check`, `ops dependencies repair`,
   `ops analyze lob`, dan `ops resume RUN_ID`.
 - Sync membuat dependency report sebelum dan sesudah load: `dependency_pre.csv` dan `dependency_post.csv`.
+- Dependency health diringkas di `dependency_summary.csv`, manifest, Excel, dan HTML.
 - Saat execute, toolkit mencoba Oracle invalid object compile dan PostgreSQL MV refresh/validation.
 - Scheduler pack tersedia di `jobs/daily.sh` dan `jobs/every_5min.sh`; keduanya memakai `--profile`, lock file, dan log rotation.
 - Cron template tersedia di `jobs/crontab.example`. Set `ALERT_COMMAND` untuk menerima alert saat job keluar non-zero.
@@ -314,6 +315,13 @@ Validasi command setelah install editable:
 pip install -e ".[dev]"
 oracle-pg-sync-audit --help
 ops report latest --config config.yaml.example
+```
+
+Lint dan security gate yang sama dengan CI:
+
+```bash
+ruff check oracle_pg_sync tests
+bandit -q -r oracle_pg_sync -lll
 ```
 
 Integration check opsional untuk PostgreSQL container + fake Oracle MERGE:

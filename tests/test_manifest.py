@@ -33,13 +33,18 @@ class ManifestTest(unittest.TestCase):
                 tables_requested=["public.sample"],
             )
 
-            path = manifest.finish(result_rows=[{"status": "DRY_RUN", "rows_loaded": 0}])
+            path = manifest.finish(
+                result_rows=[{"status": "DRY_RUN", "rows_loaded": 0}],
+                dependency_rows=[{"broken_count": 1, "invalid_count": 1}],
+            )
             text = path.read_text(encoding="utf-8")
+            data = json.loads(text)
 
         self.assertTrue(path.name.endswith("manifest.json"))
         self.assertNotIn("super-secret", text)
         self.assertNotIn("pg-secret", text)
-        self.assertEqual(json.loads(text)["run_id"], "run1")
+        self.assertEqual(data["run_id"], "run1")
+        self.assertEqual(data["dependency_summary"]["broken"], 1)
 
 
 if __name__ == "__main__":

@@ -139,6 +139,7 @@ dependency:
   auto_recompile_oracle: false
   refresh_postgres_mview: false
   max_recompile_attempts: 5
+  fail_on_broken_dependency: false
 job:
   retry: 4
   timeout_seconds: 7200
@@ -152,6 +153,7 @@ job:
         self.assertFalse(config.dependency.auto_recompile_oracle)
         self.assertFalse(config.dependency.refresh_postgres_mview)
         self.assertEqual(config.dependency.max_recompile_attempts, 5)
+        self.assertFalse(config.dependency.fail_on_broken_dependency)
         self.assertEqual(config.job.retry, 4)
         self.assertEqual(config.job.timeout_seconds, 7200)
         self.assertEqual(config.job.alert_command, "echo ALERT")

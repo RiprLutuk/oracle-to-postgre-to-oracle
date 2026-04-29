@@ -122,6 +122,7 @@ dipertahankan. Setiap `sync`/`all` membuat dependency report:
 - `dependency_post.csv`: dependency setelah load.
 - `dependency_maintenance.csv`: hasil Oracle compile invalid object,
   PostgreSQL materialized view refresh, dan validasi dependent object.
+- `dependency_summary.csv`: ringkasan broken/invalid/missing/failed dependency.
 
 ### Auto Lifecycle
 
@@ -135,6 +136,8 @@ Saat `--execute` dipakai, lifecycle otomatis adalah:
 6. Postcheck dependency dan tulis `dependency_post.csv`.
 
 Semua hasil maintenance masuk ke `dependency_maintenance.csv`.
+Jika `dependency.fail_on_broken_dependency: true`, run execute keluar non-zero
+ketika dependency critical masih broken setelah lifecycle berjalan.
 
 Shortcut DBA:
 

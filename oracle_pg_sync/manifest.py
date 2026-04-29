@@ -55,6 +55,7 @@ class RunManifest:
             "validation_summary": {},
             "checksum_summary": {},
             "lob_summary": {},
+            "dependency_summary": {},
             "checkpoint_path": checkpoint_path or "",
             "report_files": [],
             "errors": [],
@@ -71,12 +72,14 @@ class RunManifest:
         result_rows: list[dict] | None = None,
         checksum_rows: list[dict] | None = None,
         lob_rows: list[dict] | None = None,
+        dependency_rows: list[dict] | None = None,
         report_files: list[str] | None = None,
         errors: list[str] | None = None,
     ) -> Path:
         result_rows = result_rows or []
         checksum_rows = checksum_rows or []
         lob_rows = lob_rows or []
+        dependency_rows = dependency_rows or []
         self.data["finished_at"] = utc_now()
         self.data["duration_seconds"] = round(time.time() - self.started, 3)
         self.data["tables_processed"] = len(result_rows)
@@ -90,6 +93,7 @@ class RunManifest:
             "mismatch": sum(1 for row in checksum_rows if row.get("status") == "MISMATCH"),
         }
         self.data["lob_summary"] = summarize_lob_rows(lob_rows)
+        self.data["dependency_summary"] = summarize_dependency_manifest(dependency_rows)
         self.data["report_files"] = report_files or []
         self.data["errors"] = errors or [str(row.get("message")) for row in result_rows if row.get("status") == "FAILED"]
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -155,6 +159,16 @@ def summarize_lob_rows(rows: list[dict]) -> dict[str, Any]:
         "lob_types": sorted(_split_map_values(rows, "lob_type")),
         "target_types": sorted(_split_map_values(rows, "lob_target_type")),
         "validation_modes": sorted(_split_map_values(rows, "lob_validation_mode")),
+    }
+
+
+def summarize_dependency_manifest(rows: list[dict]) -> dict[str, Any]:
+    return {
+        "total": len(rows),
+        "broken": sum(1 for row in rows if int(row.get("broken_count") or 0) > 0),
+        "invalid": sum(int(row.get("invalid_count") or 0) for row in rows),
+        "missing": sum(int(row.get("missing_count") or 0) for row in rows),
+        "failed": sum(int(row.get("failed_count") or 0) for row in rows),
     }
 
 

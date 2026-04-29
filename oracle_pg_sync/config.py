@@ -182,6 +182,7 @@ class DependencyConfig:
     auto_recompile_oracle: bool = True
     refresh_postgres_mview: bool = True
     max_recompile_attempts: int = 3
+    fail_on_broken_dependency: bool = True
 
 
 @dataclass

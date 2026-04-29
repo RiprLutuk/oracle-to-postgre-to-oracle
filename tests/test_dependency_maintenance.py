@@ -4,8 +4,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from oracle_pg_sync.db import oracle, postgres
-from oracle_pg_sync.cli import _run_dependency_maintenance
+from oracle_pg_sync.cli import _dependency_failed, _run_dependency_maintenance, _write_dependency_summary
 from oracle_pg_sync.config import AppConfig, DependencyConfig, OracleConfig, PostgresConfig
+from oracle_pg_sync.dependency_health import critical_dependency_rows, summarize_dependency_rows
 
 
 class OracleDependencyMaintenanceTest(unittest.TestCase):
@@ -153,6 +154,53 @@ class DependencyLifecycleTest(unittest.TestCase):
                 )
 
         self.assertEqual(calls, ["commit", "validate"])
+
+    def test_dependency_summary_marks_broken_rows(self):
+        rows = summarize_dependency_rows(
+            [
+                {
+                    "phase": "pre",
+                    "source_db": "oracle",
+                    "table_name": "public.sample",
+                    "status": "INVALID",
+                }
+            ],
+            [
+                {
+                    "source_db": "postgres",
+                    "table_name": "public.sample",
+                    "validation_status": "missing",
+                }
+            ],
+        )
+
+        self.assertEqual(sum(row["broken_count"] for row in rows), 2)
+        self.assertEqual(len(critical_dependency_rows(rows)), 2)
+
+    def test_dependency_fail_policy_can_be_disabled(self):
+        row = {"status": "INVALID"}
+        strict = AppConfig(oracle=OracleConfig(), postgres=PostgresConfig())
+        relaxed = AppConfig(
+            oracle=OracleConfig(),
+            postgres=PostgresConfig(),
+            dependency=DependencyConfig(fail_on_broken_dependency=False),
+        )
+
+        self.assertTrue(_dependency_failed(strict, [row]))
+        self.assertFalse(_dependency_failed(relaxed, [row]))
+
+    def test_write_dependency_summary_creates_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rows = _write_dependency_summary(
+                Path(tmp),
+                [{"phase": "pre", "source_db": "oracle", "table_name": "public.sample"}],
+                [],
+            )
+
+            content = (Path(tmp) / "dependency_summary.csv").read_text(encoding="utf-8")
+
+        self.assertEqual(rows[0]["object_count"], 1)
+        self.assertIn("object_count", content)
 
 
 if __name__ == "__main__":

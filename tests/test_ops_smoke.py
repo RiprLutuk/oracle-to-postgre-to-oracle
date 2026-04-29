@@ -110,6 +110,7 @@ tables:
 
         self.assertEqual(status, 0)
         self.assertIn("oracle_connection,WARNING,skipped by --offline", output.getvalue())
+        self.assertIn("dependency_health,WARNING,skipped by --offline", output.getvalue())
 
     def test_ops_dependencies_check_delegates_to_old_cli(self):
         with patch("oracle_pg_sync.ops.cli_main", return_value=0) as cli:

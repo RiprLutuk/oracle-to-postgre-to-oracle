@@ -45,6 +45,7 @@ dependency:
   auto_recompile_oracle: true
   refresh_postgres_mview: true
   max_recompile_attempts: 3
+  fail_on_broken_dependency: true
 job:
   retry: 3
   timeout_seconds: 3600
