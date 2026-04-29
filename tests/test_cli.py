@@ -148,6 +148,12 @@ tables:
         self.assertTrue(args.execute)
         self.assertEqual(args.lob, "stream")
 
+    def test_sync_accepts_safe_modes_and_simulate(self):
+        args = build_parser().parse_args(["sync", "--mode", "truncate_safe", "--simulate"])
+
+        self.assertEqual(args.mode, "truncate_safe")
+        self.assertTrue(args.simulate)
+
     def test_sync_accepts_profiles_and_lock_flags(self):
         args = build_parser().parse_args(["sync", "--profile", "every_5min", "--lock-file", "reports/job.lock"])
 
@@ -160,7 +166,7 @@ tables:
         _apply_profile(args)
 
         self.assertTrue(args.incremental)
-        self.assertEqual(args.mode, "upsert")
+        self.assertEqual(args.mode, "incremental_safe")
 
     def test_where_override_updates_table_config(self):
         config = AppConfig(

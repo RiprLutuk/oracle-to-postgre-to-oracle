@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from oracle_pg_sync.checkpoint import CheckpointStore, Chunk
+from oracle_pg_sync.checkpoint import CheckpointStore, Chunk, RollbackAction
 
 
 class CheckpointTest(unittest.TestCase):
@@ -62,6 +62,38 @@ class CheckpointTest(unittest.TestCase):
             )
 
             self.assertEqual(store.chunk_status("run1", "public.sample", "table_committed"), "success")
+
+    def test_rollback_action_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CheckpointStore(Path(tmp) / "checkpoint.sqlite3")
+            store.add_rollback_action(
+                RollbackAction(
+                    run_id="run1",
+                    table_name="public.sample",
+                    direction="oracle_to_postgres",
+                    action_type="truncate_safe",
+                    target_schema="public",
+                    target_table="sample",
+                    backup_schema="public",
+                    backup_table="sample__backup_1",
+                )
+            )
+
+            rows = store.rollback_actions("run1")
+
+            self.assertEqual(rows[0]["backup_table"], "sample__backup_1")
+            self.assertEqual(rows[0]["action_type"], "truncate_safe")
+
+    def test_circuit_breaker_blocks_until_cooldown_expires(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CheckpointStore(Path(tmp) / "checkpoint.sqlite3")
+            store.register_job_failure("job:sync", cooldown_minutes=30, error_message="boom")
+            store.register_job_failure("job:sync", cooldown_minutes=30, error_message="boom")
+            store.register_job_failure("job:sync", cooldown_minutes=30, error_message="boom")
+
+            blocked = store.job_blocked("job:sync", max_failures=3)
+
+            self.assertIsNotNone(blocked)
 
 
 if __name__ == "__main__":

@@ -34,11 +34,13 @@ def oracle_name(table: str) -> str:
     return table.strip().strip('"').upper()
 
 
-def pg_staging_name(table: str) -> str:
-    suffix = "__load"
-    return table[: max(1, 63 - len(suffix))] + suffix
+def pg_staging_name(table: str, run_id: str) -> str:
+    suffix = f"_{run_id}"
+    prefix = "_stg_"
+    max_table_len = max(1, 63 - len(prefix) - len(suffix))
+    return f"{prefix}{table[:max_table_len]}{suffix}"
 
 
-def pg_old_name(table: str, token: str) -> str:
-    suffix = f"__old_{token}"
+def pg_old_name(table: str, token: str, *, kind: str = "backup") -> str:
+    suffix = f"__{kind}_{token}"
     return table[: max(1, 63 - len(suffix))] + suffix

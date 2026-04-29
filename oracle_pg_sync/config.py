@@ -149,7 +149,7 @@ class TableConfig:
 @dataclass
 class SyncConfig:
     default_direction: str = "oracle-to-postgres"
-    default_mode: str = "truncate"
+    default_mode: str = "truncate_safe"
     dry_run: bool = True
     fast_count: bool = True
     exact_count_after_load: bool = False
@@ -170,6 +170,11 @@ class SyncConfig:
     checkpoint_dir: Path = Path("reports/checkpoints/checkpoint.sqlite3")
     truncate_resume_strategy: str = "restart_table"
     staging_schema: str | None = None
+    backup_before_truncate: bool = True
+    backup_retention_count: int = 3
+    staging_retention_count: int = 5
+    max_failures: int = 3
+    cooldown_minutes: int = 30
 
 
 @dataclass
@@ -182,14 +187,37 @@ class DependencyConfig:
     auto_recompile_oracle: bool = True
     refresh_postgres_mview: bool = True
     max_recompile_attempts: int = 3
+    max_attempts: int = 3
     fail_on_broken_dependency: bool = True
 
 
 @dataclass
+class EmailAlertConfig:
+    from_address: str = ""
+    to: list[str] = field(default_factory=list)
+    smtp_host: str = ""
+    smtp_port: int = 25
+    username: str = ""
+    password: str = ""
+    use_tls: bool = True
+
+
+@dataclass
+class AlertConfig:
+    type: str = ""
+    url: str = ""
+    on: list[str] = field(default_factory=lambda: ["failure", "repeated_failure", "dependency_error"])
+    timeout_seconds: int = 10
+    email: EmailAlertConfig = field(default_factory=EmailAlertConfig)
+
+
+@dataclass
 class JobConfig:
+    name: str = "default"
     retry: int = 3
     timeout_seconds: int = 3600
     alert_command: str = "echo FAILED"
+    alert: AlertConfig = field(default_factory=AlertConfig)
 
 
 @dataclass
@@ -281,7 +309,7 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     reports_raw = raw.get("reports") or {}
     reports = ReportsConfig(output_dir=Path(reports_raw.get("output_dir", "reports")))
     dependency = DependencyConfig(**(raw.get("dependency") or {}))
-    job = JobConfig(**(raw.get("job") or {}))
+    job = _job_config_from_raw(raw.get("job") or {})
     tables_file = Path(raw["tables_file"]) if raw.get("tables_file") else None
     tables = _load_tables_config(raw, config_path, tables_file)
     rename_columns = {
@@ -339,6 +367,28 @@ def _incremental_config_from_raw(raw: dict[str, Any]) -> IncrementalConfig:
 def _validation_config_from_raw(raw: dict[str, Any]) -> ValidationConfig:
     checksum_raw = raw.get("checksum") or {}
     return ValidationConfig(checksum=ChecksumConfig(**checksum_raw))
+
+
+def _job_config_from_raw(raw: dict[str, Any]) -> JobConfig:
+    item = dict(raw)
+    alert_raw = item.get("alert") or {}
+    email_raw = alert_raw.get("email") or {}
+    item["alert"] = AlertConfig(
+        type=str(alert_raw.get("type") or ""),
+        url=str(alert_raw.get("url") or ""),
+        on=[str(value) for value in (alert_raw.get("on") or ["failure", "repeated_failure", "dependency_error"])],
+        timeout_seconds=int(alert_raw.get("timeout_seconds", 10) or 10),
+        email=EmailAlertConfig(
+            from_address=str(email_raw.get("from_address") or ""),
+            to=[str(value) for value in (email_raw.get("to") or [])],
+            smtp_host=str(email_raw.get("smtp_host") or ""),
+            smtp_port=int(email_raw.get("smtp_port", 25) or 25),
+            username=str(email_raw.get("username") or ""),
+            password=str(email_raw.get("password") or ""),
+            use_tls=bool(email_raw.get("use_tls", True)),
+        ),
+    )
+    return JobConfig(**item)
 
 
 def _lob_strategy_from_raw(raw: dict[str, Any], *, default: str | None) -> LobStrategyConfig:

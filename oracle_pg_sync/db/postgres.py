@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import psycopg
@@ -33,6 +34,14 @@ def table_exists(cur, schema: str, table: str) -> bool:
 
 def count_rows(cur, schema: str, table: str) -> int:
     cur.execute(sql.SQL("SELECT COUNT(1) FROM {}").format(table_ident(schema, table)))
+    return int(cur.fetchone()[0])
+
+
+def count_rows_where(cur, schema: str, table: str, where: str | None = None) -> int:
+    stmt = sql.SQL("SELECT COUNT(1) FROM {}").format(table_ident(schema, table))
+    if where:
+        stmt += sql.SQL(" WHERE ") + sql.SQL(where)
+    cur.execute(stmt)
     return int(cur.fetchone()[0])
 
 
@@ -84,6 +93,22 @@ def total_relation_size_bytes(cur, schema: str, table: str) -> int | None:
     )
     row = cur.fetchone()
     return int(row[0]) if row and row[0] is not None else None
+
+
+def list_matching_tables(cur, schema: str, pattern: str) -> list[str]:
+    cur.execute(
+        """
+        SELECT c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %s
+          AND c.relkind IN ('r', 'p')
+          AND c.relname LIKE %s
+        ORDER BY c.relname DESC
+        """,
+        (schema, pattern),
+    )
+    return [str(row[0]) for row in cur.fetchall()]
 
 
 def list_tables(cur, schema: str) -> list[str]:
@@ -181,25 +206,12 @@ def object_counts(cur, schema: str, table: str) -> dict[str, int]:
             """,
             (schema, table),
         ),
-        "function_count_related_postgres": (
-            """
-            SELECT COUNT(DISTINCT p.oid)
-            FROM pg_depend d
-            JOIN pg_proc p ON p.oid = d.objid
-            WHERE d.refobjid = (
-                SELECT c.oid
-                FROM pg_class c
-                JOIN pg_namespace n ON n.oid = c.relnamespace
-                WHERE n.nspname = %s AND c.relname = %s
-            )
-            """,
-            (schema, table),
-        ),
     }
     counts: dict[str, int] = {}
     for key, (query, params) in queries.items():
         cur.execute(query, params)
         counts[key] = int(cur.fetchone()[0] or 0)
+    counts["function_count_related_postgres"] = len(_function_dependency_rows(cur, schema, table))
     return counts
 
 
@@ -278,9 +290,15 @@ def _index_rows(cur, schema: str, table: str) -> list[dict[str, Any]]:
 
 
 def _function_dependency_rows(cur, schema: str, table: str) -> list[dict[str, Any]]:
+    rows = _exact_function_dependency_rows(cur, schema, table)
+    rows.extend(_heuristic_function_dependency_rows(cur, schema, table, existing=rows))
+    return rows
+
+
+def _exact_function_dependency_rows(cur, schema: str, table: str) -> list[dict[str, Any]]:
     cur.execute(
         """
-        SELECT pn.nspname, p.proname, p.prokind::text
+        SELECT pn.nspname, p.proname, p.prokind::text, pg_get_function_identity_arguments(p.oid)
         FROM pg_depend d
         JOIN pg_proc p ON p.oid = d.objid
         JOIN pg_namespace pn ON pn.oid = p.pronamespace
@@ -306,10 +324,66 @@ def _function_dependency_rows(cur, schema: str, table: str) -> list[dict[str, An
             "referenced_schema": schema,
             "referenced_name": table,
             "referenced_type": "TABLE",
-            "details": f"prokind={row[2]}",
+            "details": f"prokind={row[2]};args={row[3] or ''};source=pg_depend",
         }
         for row in cur.fetchall()
     ]
+
+
+def _heuristic_function_dependency_rows(
+    cur,
+    schema: str,
+    table: str,
+    *,
+    existing: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    seen = {
+        (
+            str(row.get("object_schema") or "").lower(),
+            str(row.get("object_name") or "").lower(),
+            str(row.get("object_type") or "").upper(),
+        )
+        for row in existing
+    }
+    cur.execute(
+        """
+        SELECT pn.nspname, p.proname, p.prokind::text,
+               pg_get_function_identity_arguments(p.oid),
+               pg_get_functiondef(p.oid)
+        FROM pg_proc p
+        JOIN pg_namespace pn ON pn.oid = p.pronamespace
+        WHERE pn.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND pg_get_functiondef(p.oid) ILIKE '%' || %s || '%'
+        ORDER BY pn.nspname, p.proname
+        """,
+        (table,),
+    )
+    matcher = _table_reference_pattern(schema, table)
+    kind_map = {"f": "FUNCTION", "p": "PROCEDURE", "a": "AGGREGATE", "w": "WINDOW"}
+    rows: list[dict[str, Any]] = []
+    for object_schema, object_name, prokind, args, definition in cur.fetchall():
+        object_type = kind_map.get(prokind, "FUNCTION")
+        key = (str(object_schema).lower(), str(object_name).lower(), object_type)
+        if key in seen:
+            continue
+        definition_text = str(definition or "")
+        if not matcher.search(definition_text):
+            continue
+        rows.append(
+            {
+                "source_db": "postgres",
+                "table_name": f"{schema}.{table}",
+                "object_schema": object_schema,
+                "object_name": object_name,
+                "object_type": object_type,
+                "dependency_kind": "function_definition_reference",
+                "referenced_schema": schema,
+                "referenced_name": table,
+                "referenced_type": "TABLE",
+                "details": f"prokind={prokind};args={args or ''};source=pg_get_functiondef heuristic",
+            }
+        )
+    return rows
 
 
 def _trigger_rows(cur, schema: str, table: str) -> list[dict[str, Any]]:
@@ -421,6 +495,18 @@ def _split_pg_fqname(value: str, *, default_schema: str) -> tuple[str, str]:
         return default_schema, cleaned
     schema, name = cleaned.rsplit(".", 1)
     return schema, name
+
+
+def _table_reference_pattern(schema: str, table: str) -> re.Pattern[str]:
+    schema_re = re.escape(schema)
+    table_re = re.escape(table)
+    parts = [
+        rf'(?<![A-Za-z0-9_]){schema_re}\s*\.\s*{table_re}(?![A-Za-z0-9_])',
+        rf'(?<![A-Za-z0-9_])"{schema_re}"\s*\.\s*"{table_re}"(?![A-Za-z0-9_])',
+        rf'(?<![A-Za-z0-9_]){table_re}(?![A-Za-z0-9_])',
+        rf'(?<![A-Za-z0-9_])"{table_re}"(?![A-Za-z0-9_])',
+    ]
+    return re.compile("|".join(parts), re.IGNORECASE)
 
 
 def _dedupe_dependency_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -690,6 +776,11 @@ def truncate_table(cur, schema: str, table: str, *, cascade: bool = False) -> No
         sql.SQL(" CASCADE") if cascade else sql.SQL(""),
     )
     cur.execute(stmt)
+
+
+def drop_tables(cur, schema: str, tables: list[str]) -> None:
+    for table in tables:
+        cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(table_ident(schema, table)))
 
 
 def insert_from_table(

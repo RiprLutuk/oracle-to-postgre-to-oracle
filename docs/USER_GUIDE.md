@@ -63,7 +63,7 @@ Example table entry:
 tables:
   - name: public.address
     directions: [oracle-to-postgres, postgres-to-oracle]
-    oracle_to_postgres_mode: truncate
+    oracle_to_postgres_mode: truncate_safe
     postgres_to_oracle_mode: upsert
     key_columns: [address_id]
     incremental:
@@ -103,6 +103,12 @@ oracle-pg-sync-audit audit-objects --config config.yaml
 
 ## Sync Oracle -> PostgreSQL
 
+Production-safe modes:
+
+- `truncate_safe`: load to `_stg_<table>_<run_id>`, validate rowcount + checksum, then truncate and refill from staging
+- `swap_safe`: load and validate a new table, atomically rename, keep `table__backup_<timestamp>` for rollback
+- `incremental_safe`: load changed rows to staging, validate them, back up target, then apply staged upsert
+
 Dry-run is the default:
 
 ```bash
@@ -119,6 +125,18 @@ Run all configured Oracle -> PostgreSQL tables:
 
 ```bash
 ops sync --config config.yaml --direction oracle-to-postgres --go
+```
+
+Risk simulation:
+
+```bash
+ops sync --config config.yaml --direction oracle-to-postgres --simulate
+```
+
+Rollback by run ID:
+
+```bash
+ops rollback <run_id> --config config.yaml
 ```
 
 Daily full-refresh defaults:
@@ -182,14 +200,15 @@ oracle-pg-sync-audit sync --config config.yaml --list-runs
 
 Profiles:
 
-- `--profile daily` -> forces full-refresh semantics
-- `--profile every_5min` -> defaults to `upsert` plus `--incremental`
+- `--profile daily` -> defaults to `truncate_safe` full refresh
+- `--profile every_5min` -> defaults to `incremental_safe` plus `--incremental`
 
 Notes:
 
 - reverse sync currently checkpoints at full-table phase granularity
 - Oracle -> PostgreSQL chunk/checkpoint state is stored in the same SQLite checkpoint database
 - watermarks are stored by direction, table, strategy, and column
+- safe-mode watermark updates are deferred until the full run and dependency maintenance succeed
 
 ## LOB Handling
 
@@ -239,9 +258,12 @@ Lifecycle on execute/repair:
 
 1. collect dependency graph
 2. refresh dependent PostgreSQL materialized views
-3. recompile invalid Oracle view/package/function/procedure objects in a loop
-4. validate dependent PostgreSQL objects still exist
-5. fail the run if critical dependency rows remain and `dependency.fail_on_broken_dependency` is true
+3. detect invalid Oracle objects
+4. recompile invalid Oracle view/package/function/procedure objects in a loop
+5. validate dependent PostgreSQL objects still exist
+6. fail the run if critical dependency rows remain and `dependency.fail_on_broken_dependency` is true
+
+If dependency maintenance still fails after the configured repair loop, the sync run is marked failed, rollback is attempted for safe modes, and alerts are emitted when configured.
 
 The dependency commands write run-scoped CSV, Excel, and HTML reports.
 
@@ -258,6 +280,22 @@ Current checks include:
 
 - config load
 - table config presence
+
+## Production Workflow
+
+Recommended production sequence:
+
+1. `ops doctor --config config.yaml`
+2. `ops audit --config config.yaml`
+3. `ops sync --config config.yaml --direction oracle-to-postgres --simulate`
+4. `ops sync --config config.yaml --direction oracle-to-postgres --profile daily --go`
+5. `ops report latest --config config.yaml`
+
+For cron:
+
+- `jobs/daily.sh oracle_to_pg` should use the safe daily profile
+- `jobs/incremental.sh oracle_to_pg` should use `incremental_safe` on tables with a protected watermark
+- keep `ops rollback <run_id>` in the on-call procedure for every execute job
 - checkpoint path
 - lock file path
 - disk space

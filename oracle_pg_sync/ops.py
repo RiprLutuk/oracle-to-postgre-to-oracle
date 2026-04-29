@@ -23,6 +23,8 @@ def main(argv: list[str] | None = None) -> int:
     rest = args[1:]
     if command in {"audit", "sync"}:
         return cli_main([command, *rest])
+    if command == "rollback":
+        return _rollback(rest)
     if command == "doctor":
         return _doctor(rest)
     if command == "dependencies":
@@ -61,12 +63,14 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _print_usage() -> None:
-    print("Usage: ops audit|sync|resume|status|watermarks|reset-watermark|validate|report|doctor ...")
+    print("Usage: ops audit|sync|rollback|resume|status|watermarks|reset-watermark|validate|report|doctor ...")
     print("")
     print("Common:")
     print("  ops audit --config config.yaml")
     print("  ops sync --config config.yaml")
+    print("  ops sync --simulate --config config.yaml")
     print("  ops sync --go --config config.yaml")
+    print("  ops rollback RUN_ID --config config.yaml")
     print("  ops resume [RUN_ID] --config config.yaml")
     print("  ops status --config config.yaml")
     print("  ops report latest --config config.yaml")
@@ -107,6 +111,29 @@ def _doctor(args: list[str]) -> int:
     critical = critical or any(row[1] == "ERROR" for row in rows)
     _print_check_rows(rows)
     return 1 if critical else 0
+
+
+def _rollback(args: list[str]) -> int:
+    from oracle_pg_sync.rollback import rollback_run
+    from oracle_pg_sync.utils.logging import setup_logging
+
+    if not args or args[0].startswith("-"):
+        print("Usage: ops rollback RUN_ID [--config config.yaml]")
+        return 2
+    run_id = args[0]
+    config = load_config(_config_path(args[1:]))
+    logger = setup_logging(Path(config.reports.output_dir))
+    checkpoint_store = CheckpointStore(config.sync.checkpoint_dir)
+    rows = rollback_run(config, checkpoint_store, run_id=run_id, logger=logger)
+    if not rows:
+        print("run_id,status,message")
+        print(f"{run_id},FAILED,no rollback actions found")
+        return 1
+    fields = list(rows[0].keys())
+    print(",".join(fields))
+    for row in rows:
+        print(",".join(str(row.get(field, "")) for field in fields))
+    return 1 if any(row.get("status") == "FAILED" for row in rows) else 0
 
 
 def _dependencies(args: list[str]) -> int:

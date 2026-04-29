@@ -16,10 +16,12 @@ The workbook name is `report.xlsx` and the HTML dashboard is `report.html`.
 - `type_mismatch.csv`: incompatible type-only subset
 - `sync_result.csv`: per-table sync results
 - `validation_checksum.csv`: checksum output when enabled
+- `metrics.json`: per-table throughput, bytes, LOB volume, and slow-table summary
 - `dependency_pre.csv`: dependency graph before sync/repair
 - `dependency_post.csv`: dependency graph after sync/repair
 - `dependency_maintenance.csv`: refresh/recompile/validation actions
 - `dependency_summary.csv`: rolled-up dependency health
+- `rollback_result.csv`: automatic/manual rollback outcome when a rollback was attempted
 - `lob_analysis.csv`: LOB analysis command output
 - `schema_suggestions.sql`: add/drop column suggestions from audit diff rows
 - `logs.txt`: captured run log
@@ -42,7 +44,9 @@ Sheets are fixed:
 12. `11_Checkpoint`
 13. `12_Performance`
 14. `13_Errors`
-15. `14_Config`
+15. `14_Rollback`
+16. `15_Timeline`
+17. `16_Config`
 
 ### `00_Dashboard`
 
@@ -125,7 +129,7 @@ The HTML report:
 - highlights `ERROR` rows
 - filters by table status and severity
 - hides `INFO` diff rows by default
-- shows dependency, checksum, LOB, and sync problem sections
+- shows dependency, checksum, failure timeline, rollback, LOB, and sync problem sections
 
 ## Dependency Reporting
 
@@ -135,6 +139,8 @@ Dependency sheets and CSVs use:
 - `invalid_count`
 - `missing_count`
 - `failed_count`
+
+`dependency_maintenance.csv` now also carries repair-loop attempts, whether an object was fixed, and whether invalid objects still remained after the final attempt.
 
 When `dependency.fail_on_broken_dependency` is enabled, any critical dependency rows can make an execute or repair run exit non-zero.
 
@@ -151,3 +157,21 @@ LOB analysis and sync rows show:
 ## Watermarks And Checkpoints
 
 `10_Watermark` and `11_Checkpoint` are pulled from the SQLite checkpoint store. They are the operational view for resume and incremental state.
+
+## Performance And Failure Metrics
+
+`metrics.json` and `12_Performance` expose:
+
+- `rows_per_second`
+- `bytes_processed`
+- `bytes_per_second`
+- `lob_bytes_processed`
+- `elapsed_seconds`
+- `error_rate`
+- rollback availability
+
+`manifest.json` now also includes:
+
+- `metrics_summary`
+- `rollback_summary`
+- `failure_timeline`

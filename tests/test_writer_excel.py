@@ -56,7 +56,9 @@ class WriterExcelTest(unittest.TestCase):
                 "11_Checkpoint",
                 "12_Performance",
                 "13_Errors",
-                "14_Config",
+                "14_Rollback",
+                "15_Timeline",
+                "16_Config",
             ],
         )
         self.assertEqual(workbook["00_Dashboard"].freeze_panes, "A2")
@@ -90,6 +92,27 @@ class WriterExcelTest(unittest.TestCase):
         messages = [str(item.message) for item in caught]
         self.assertFalse(any("Cell contents too long" in message for message in messages))
         value = workbook["02_Table_Sync_Status"]["C2"].value
+        self.assertLessEqual(len(value), EXCEL_CELL_MAX_CHARS)
+        self.assertIn("truncated", value)
+
+    def test_long_list_values_are_truncated_before_openpyxl_warning(self):
+        from oracle_pg_sync.reports.writer_excel import EXCEL_CELL_MAX_CHARS, write_central_report_xlsx
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "report.xlsx"
+
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                write_central_report_xlsx(
+                    path,
+                    config_sanitized={"tables": ["x" * 5000 for _ in range(20)]},
+                )
+
+            workbook = load_workbook(path)
+
+        messages = [str(item.message) for item in caught]
+        self.assertFalse(any("Cell contents too long" in message for message in messages))
+        value = workbook["16_Config"]["B2"].value
         self.assertLessEqual(len(value), EXCEL_CELL_MAX_CHARS)
         self.assertIn("truncated", value)
 

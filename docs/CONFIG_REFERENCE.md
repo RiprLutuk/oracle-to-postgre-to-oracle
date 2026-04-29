@@ -49,7 +49,7 @@ postgres:
 Important fields:
 
 - `default_direction`: `oracle-to-postgres` or `postgres-to-oracle`
-- `default_mode`: `truncate`, `swap`, `append`, `upsert`, or `delete`
+- `default_mode`: `truncate_safe`, `swap_safe`, `incremental_safe`, `append`, `truncate`, `swap`, `upsert`, or `delete`
 - `dry_run`: keep `true` in production configs; execution still requires `--go`
 - `fast_count`: use metadata/statistics counts during audit
 - `exact_count_after_load`: perform post-load exact rowcount verification
@@ -70,8 +70,23 @@ Important fields:
 - `checkpoint_dir`
 - `truncate_resume_strategy`
 - `staging_schema`
+- `backup_before_truncate`
+- `backup_retention_count`
+- `staging_retention_count`
+- `max_failures`
+- `cooldown_minutes`
 
 Current checkpoint storage is SQLite and lives under `sync.checkpoint_dir`.
+
+Recommended production values:
+
+```yaml
+sync:
+  default_mode: truncate_safe
+  backup_before_truncate: true
+  max_failures: 3
+  cooldown_minutes: 30
+```
 
 ### `reports`
 
@@ -87,16 +102,55 @@ dependency:
   auto_recompile_oracle: true
   refresh_postgres_mview: true
   max_recompile_attempts: 3
+  max_attempts: 3
   fail_on_broken_dependency: true
 ```
+
+`max_attempts` controls the full repair loop. The run fails if invalid objects still remain after the last attempt.
 
 ### `job`
 
 ```yaml
 job:
+  name: oracle_to_pg_daily
   retry: 3
   timeout_seconds: 3600
   alert_command: echo FAILED
+  alert:
+    type: webhook
+    url: https://hooks.example.net/services/...
+    on:
+      - failure
+      - repeated_failure
+      - dependency_error
+    timeout_seconds: 10
+```
+
+Webhook/email alerts use the structured payload:
+
+```json
+{
+  "run_id": "abc123",
+  "direction": "oracle-to-postgres",
+  "error": "dependency validation failed",
+  "failed_tables": ["public.address"]
+}
+```
+
+Email settings:
+
+```yaml
+job:
+  alert:
+    type: email
+    email:
+      from_address: sync-bot@example.com
+      to: [dba@example.com, oncall@example.com]
+      smtp_host: smtp.example.com
+      smtp_port: 587
+      username: smtp-user
+      password: ${SMTP_PASSWORD}
+      use_tls: true
 ```
 
 These fields are part of the config model and show up in sanitized run reports. The shell wrappers under `jobs/` currently read their runtime values from environment variables such as `RETRY`, `TIMEOUT_SECONDS`, and `ALERT_COMMAND`.
@@ -173,7 +227,7 @@ Simple external table file:
 tables:
   - name: public.address
     directions: [oracle-to-postgres, postgres-to-oracle]
-    oracle_to_postgres_mode: truncate
+    oracle_to_postgres_mode: truncate_safe
     postgres_to_oracle_mode: upsert
     key_columns: [address_id]
 ```
@@ -214,6 +268,27 @@ Supported strategies:
 
 - `updated_at`
 - `numeric_key`
+
+## Safe Mode Semantics
+
+`truncate_safe`
+
+- loads source rows into `_stg_<table>_<run_id>`
+- validates staging rowcount and checksum before touching target
+- optionally creates `table__backup_<timestamp>` before truncation
+
+`swap_safe`
+
+- builds and validates a replacement table
+- performs atomic rename cutover
+- preserves the previous table as `table__backup_<timestamp>`
+
+`incremental_safe`
+
+- loads changed rows into staging
+- validates the staged delta
+- backs up the target before applying staged upsert
+- delays watermark updates until the overall run succeeds
 
 ## Smart Schema Diff Semantics
 

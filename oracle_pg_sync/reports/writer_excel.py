@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,8 @@ def write_central_report_xlsx(
     maintenance_rows: list[dict] | None = None,
     watermark_rows: list[dict] | None = None,
     checkpoint_rows: list[dict] | None = None,
+    rollback_rows: list[dict] | None = None,
+    timeline_rows: list[dict] | None = None,
     config_sanitized: dict[str, Any] | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -48,6 +51,8 @@ def write_central_report_xlsx(
     maintenance_rows = maintenance_rows or []
     watermark_rows = watermark_rows or []
     checkpoint_rows = checkpoint_rows or []
+    rollback_rows = rollback_rows or []
+    timeline_rows = timeline_rows or []
     table_status_rows = sync_rows or inventory_rows
     combined_column_diff_rows = _combine_column_diff_rows(column_diff_rows, type_mismatch_rows)
     rowcount_rows = _rowcount_rows(sync_rows, inventory_rows)
@@ -67,7 +72,9 @@ def write_central_report_xlsx(
         "11_Checkpoint": checkpoint_rows,
         "12_Performance": _performance_rows(sync_rows),
         "13_Errors": error_rows,
-        "14_Config": _flatten_config(config_sanitized or {}),
+        "14_Rollback": rollback_rows,
+        "15_Timeline": timeline_rows,
+        "16_Config": _flatten_config(config_sanitized or {}),
     }
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for name, rows in sheets.items():
@@ -155,6 +162,10 @@ def _performance_rows(sync_rows: list[dict]) -> list[dict]:
             "rows_loaded": row.get("rows_loaded"),
             "elapsed_seconds": row.get("elapsed_seconds"),
             "rows_per_second": _rows_per_second(row),
+            "bytes_processed": row.get("bytes_processed"),
+            "bytes_per_second": row.get("bytes_per_second"),
+            "lob_bytes_processed": row.get("lob_bytes_processed"),
+            "retry_attempts": row.get("retry_attempts"),
         }
         for row in sync_rows
     ]
@@ -251,6 +262,13 @@ def _excel_safe_row(row: dict) -> dict:
 
 
 def _excel_safe_value(value: Any) -> Any:
+    if isinstance(value, (list, dict, tuple, set)):
+        try:
+            value = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            value = str(value)
+    elif value is not None and not isinstance(value, (str, int, float, bool)):
+        value = str(value)
     if not isinstance(value, str) or len(value) <= EXCEL_CELL_MAX_CHARS:
         return value
     omitted = len(value) - EXCEL_SAFE_CELL_CHARS

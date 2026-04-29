@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import uuid
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass, is_dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,24 @@ class Chunk:
     chunk_end: Any = None
     primary_key: str | None = None
     where: str | None = None
+
+
+@dataclass(frozen=True)
+class RollbackAction:
+    run_id: str
+    table_name: str
+    direction: str
+    action_type: str
+    target_schema: str
+    target_table: str
+    backup_schema: str = ""
+    backup_table: str = ""
+    staging_schema: str = ""
+    staging_table: str = ""
+    prior_watermark: str = ""
+    dependency_state: dict[str, Any] | None = None
+    status: str = "ready"
+    notes: str = ""
 
 
 class CheckpointStore:
@@ -54,6 +73,8 @@ class CheckpointStore:
                 )
                 """
             )
+            self._ensure_column(con, "sync_runs", "job_name", "TEXT")
+            self._ensure_column(con, "sync_runs", "mode", "TEXT")
             con.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sync_chunks (
@@ -79,6 +100,53 @@ class CheckpointStore:
             )
             con.execute(
                 """
+                CREATE TABLE IF NOT EXISTS rollback_actions (
+                    run_id TEXT NOT NULL,
+                    table_name TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    action_type TEXT NOT NULL,
+                    target_schema TEXT NOT NULL,
+                    target_table TEXT NOT NULL,
+                    backup_schema TEXT,
+                    backup_table TEXT,
+                    staging_schema TEXT,
+                    staging_table TEXT,
+                    prior_watermark TEXT,
+                    dependency_state TEXT,
+                    status TEXT NOT NULL,
+                    notes TEXT,
+                    created_at TEXT NOT NULL,
+                    restored_at TEXT,
+                    PRIMARY KEY (run_id, table_name, action_type)
+                )
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS run_events (
+                    run_id TEXT NOT NULL,
+                    event_time TEXT NOT NULL,
+                    table_name TEXT,
+                    phase TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    message TEXT,
+                    details TEXT
+                )
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE IF NOT EXISTS circuit_breakers (
+                    job_key TEXT PRIMARY KEY,
+                    failure_count INTEGER NOT NULL DEFAULT 0,
+                    last_failure_at TEXT,
+                    cooldown_until TEXT,
+                    last_error TEXT
+                )
+                """
+            )
+            con.execute(
+                """
                 CREATE TABLE IF NOT EXISTS watermarks (
                     direction TEXT NOT NULL,
                     table_name TEXT NOT NULL,
@@ -91,15 +159,24 @@ class CheckpointStore:
                 """
             )
 
-    def create_run(self, *, run_id: str, direction: str, source_db: str, target_db: str) -> None:
+    def create_run(
+        self,
+        *,
+        run_id: str,
+        direction: str,
+        source_db: str,
+        target_db: str,
+        job_name: str = "",
+        mode: str = "",
+    ) -> None:
         with self.connect() as con:
             con.execute(
                 """
                 INSERT OR IGNORE INTO sync_runs
-                (run_id, direction, source_db, target_db, status, started_at)
-                VALUES (?, ?, ?, ?, 'running', ?)
+                (run_id, direction, source_db, target_db, status, started_at, job_name, mode)
+                VALUES (?, ?, ?, ?, 'running', ?, ?, ?)
                 """,
-                (run_id, direction, source_db, target_db, utc_now()),
+                (run_id, direction, source_db, target_db, utc_now(), job_name, mode),
             )
 
     def finish_run(self, run_id: str, *, status: str, error_message: str = "") -> None:
@@ -122,7 +199,144 @@ class CheckpointStore:
     def reset_run(self, run_id: str) -> None:
         with self.connect() as con:
             con.execute("DELETE FROM sync_chunks WHERE run_id = ?", (run_id,))
+            con.execute("DELETE FROM rollback_actions WHERE run_id = ?", (run_id,))
+            con.execute("DELETE FROM run_events WHERE run_id = ?", (run_id,))
             con.execute("DELETE FROM sync_runs WHERE run_id = ?", (run_id,))
+
+    def record_event(
+        self,
+        *,
+        run_id: str,
+        phase: str,
+        status: str,
+        table_name: str = "",
+        message: str = "",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        with self.connect() as con:
+            con.execute(
+                """
+                INSERT INTO run_events
+                (run_id, event_time, table_name, phase, status, message, details)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, utc_now(), table_name, phase, status, message, _json_text(details)),
+            )
+
+    def list_events(self, run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as con:
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                "SELECT * FROM run_events WHERE run_id = ? ORDER BY event_time, table_name, phase",
+                (run_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["details"] = _json_load(item.get("details"))
+            result.append(item)
+        return result
+
+    def add_rollback_action(self, action: RollbackAction) -> None:
+        payload = asdict(action)
+        with self.connect() as con:
+            con.execute(
+                """
+                INSERT OR REPLACE INTO rollback_actions (
+                    run_id, table_name, direction, action_type, target_schema, target_table,
+                    backup_schema, backup_table, staging_schema, staging_table,
+                    prior_watermark, dependency_state, status, notes, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    payload["run_id"],
+                    payload["table_name"],
+                    payload["direction"],
+                    payload["action_type"],
+                    payload["target_schema"],
+                    payload["target_table"],
+                    payload["backup_schema"],
+                    payload["backup_table"],
+                    payload["staging_schema"],
+                    payload["staging_table"],
+                    payload["prior_watermark"],
+                    _json_text(payload["dependency_state"]),
+                    payload["status"],
+                    payload["notes"],
+                    utc_now(),
+                ),
+            )
+
+    def rollback_actions(self, run_id: str) -> list[dict[str, Any]]:
+        with self.connect() as con:
+            con.row_factory = sqlite3.Row
+            rows = con.execute(
+                "SELECT * FROM rollback_actions WHERE run_id = ? ORDER BY created_at DESC, table_name",
+                (run_id,),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["dependency_state"] = _json_load(item.get("dependency_state"))
+            result.append(item)
+        return result
+
+    def mark_rollback_action(self, run_id: str, table_name: str, action_type: str, *, status: str, notes: str = "") -> None:
+        with self.connect() as con:
+            con.execute(
+                """
+                UPDATE rollback_actions
+                SET status = ?, notes = ?, restored_at = ?
+                WHERE run_id = ? AND table_name = ? AND action_type = ?
+                """,
+                (status, notes, utc_now(), run_id, table_name, action_type),
+            )
+
+    def circuit_status(self, job_key: str) -> dict[str, Any] | None:
+        with self.connect() as con:
+            con.row_factory = sqlite3.Row
+            row = con.execute("SELECT * FROM circuit_breakers WHERE job_key = ?", (job_key,)).fetchone()
+        return dict(row) if row else None
+
+    def register_job_failure(self, job_key: str, *, cooldown_minutes: int, error_message: str) -> dict[str, Any]:
+        current = self.circuit_status(job_key) or {}
+        failure_count = int(current.get("failure_count") or 0) + 1
+        now = utc_now()
+        cooldown_until = ""
+        if cooldown_minutes > 0:
+            cooldown_until = (
+                datetime.now(timezone.utc).replace(microsecond=0) + timedelta(minutes=int(cooldown_minutes))
+            ).isoformat(timespec="seconds")
+        with self.connect() as con:
+            con.execute(
+                """
+                INSERT INTO circuit_breakers (job_key, failure_count, last_failure_at, cooldown_until, last_error)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(job_key) DO UPDATE SET
+                    failure_count = excluded.failure_count,
+                    last_failure_at = excluded.last_failure_at,
+                    cooldown_until = excluded.cooldown_until,
+                    last_error = excluded.last_error
+                """,
+                (job_key, failure_count, now, cooldown_until, error_message),
+            )
+        return self.circuit_status(job_key) or {}
+
+    def clear_job_failures(self, job_key: str) -> None:
+        with self.connect() as con:
+            con.execute("DELETE FROM circuit_breakers WHERE job_key = ?", (job_key,))
+
+    def job_blocked(self, job_key: str, *, max_failures: int) -> dict[str, Any] | None:
+        status = self.circuit_status(job_key)
+        if not status:
+            return None
+        if int(status.get("failure_count") or 0) < int(max_failures or 0):
+            return None
+        cooldown_until = _parse_dt(status.get("cooldown_until"))
+        if cooldown_until and cooldown_until > datetime.now(timezone.utc):
+            return status
+        return None
 
     def ensure_chunk(
         self,
@@ -290,6 +504,15 @@ class CheckpointStore:
             cur = con.execute("DELETE FROM watermarks WHERE table_name = ?", (table_name,))
             return int(cur.rowcount or 0)
 
+    @staticmethod
+    def _ensure_column(con: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+        existing = {
+            str(row[1]).lower()
+            for row in con.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+        if column_name.lower() not in existing:
+            con.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+
 
 def _validate_status(status: str) -> None:
     if status not in STATUSES:
@@ -300,3 +523,27 @@ def _to_text(value: Any) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _json_text(value: Any) -> str:
+    if is_dataclass(value):
+        value = asdict(value)
+    return json.dumps(value or {}, sort_keys=True)
+
+
+def _json_load(value: Any) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        return json.loads(str(value))
+    except Exception:
+        return {}
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except Exception:
+        return None

@@ -83,6 +83,8 @@ MAINTENANCE_FIELDS = [
     "compile_status",
     "error_message",
 ]
+ROLLBACK_FIELDS = ["run_id", "table_name", "action_type", "backup_table", "status", "message"]
+TIMELINE_FIELDS = ["event_time", "table_name", "phase", "status", "message"]
 
 
 def write_html_report(
@@ -96,6 +98,9 @@ def write_html_report(
     dependency_rows: list[dict] | None = None,
     dependency_summary_rows: list[dict] | None = None,
     maintenance_rows: list[dict] | None = None,
+    rollback_rows: list[dict] | None = None,
+    timeline_rows: list[dict] | None = None,
+    include_empty_sections: bool = False,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     sync_rows = sync_rows or []
@@ -112,6 +117,8 @@ def write_html_report(
     dependency_rows = dependency_rows or []
     dependency_summary_rows = dependency_summary_rows or []
     maintenance_rows = maintenance_rows or []
+    rollback_rows = rollback_rows or []
+    timeline_rows = timeline_rows or []
     lob_rows = lob_rows or [row for row in sync_rows if row.get("lob_columns_detected") or row.get("lob_type")]
     column_diff_rows = _combine_column_diff_rows(column_diff_rows)
     dependency_heavy = sorted(
@@ -236,16 +243,18 @@ def write_html_report(
     <div class="metric">Schema ERROR<strong>{sum(1 for row in column_diff_rows if str(row.get("severity", "")).upper() == "ERROR")}</strong></div>
     <div class="metric">Schema INFO<strong>{sum(1 for row in column_diff_rows if str(row.get("severity", "")).upper() == "INFO")}</strong></div>
   </div>
-  {_section("Top Table Rowcount Terbesar", top_rows, TOP_ROWCOUNT_FIELDS)}
-  {_section("Column Diff", column_diff_rows[:100], COLUMN_DIFF_FIELDS)}
-  {_section("Rowcount Mismatch", rowcount_mismatch[:100], TOP_ROWCOUNT_FIELDS)}
-  {_section("Dependency Summary", dependency_summary_rows, DEPENDENCY_SUMMARY_FIELDS)}
-  {_section("Dependency Object Terbanyak", dependency_heavy, DEPENDENCY_HEAVY_FIELDS)}
-  {_section("Sync Bermasalah", failed_sync[:100], SYNC_PROBLEM_FIELDS)}
-  {_section("Checksum Validation", checksum_rows[:100], CHECKSUM_FIELDS)}
-  {_section("LOB Summary", lob_rows[:100], LOB_FIELDS)}
-  {_section("Object Dependency", dependency_rows[:100], DEPENDENCY_FIELDS)}
-  {_section("MV / View Maintenance", maintenance_rows[:100], MAINTENANCE_FIELDS)}
+  {_section("Top Table Rowcount Terbesar", top_rows, TOP_ROWCOUNT_FIELDS, include_when_empty=include_empty_sections)}
+  {_section("Column Diff", column_diff_rows[:100], COLUMN_DIFF_FIELDS, include_when_empty=include_empty_sections)}
+  {_section("Rowcount Mismatch", rowcount_mismatch[:100], TOP_ROWCOUNT_FIELDS, include_when_empty=include_empty_sections)}
+  {_section("Dependency Summary", dependency_summary_rows, DEPENDENCY_SUMMARY_FIELDS, include_when_empty=include_empty_sections)}
+  {_section("Dependency Object Terbanyak", dependency_heavy, DEPENDENCY_HEAVY_FIELDS, include_when_empty=include_empty_sections)}
+  {_section("Sync Bermasalah", failed_sync[:100], SYNC_PROBLEM_FIELDS, include_when_empty=include_empty_sections)}
+  {_section("Checksum Validation", checksum_rows[:100], CHECKSUM_FIELDS, include_when_empty=include_empty_sections)}
+  {_section("Failure Timeline", timeline_rows[:200], TIMELINE_FIELDS, include_when_empty=include_empty_sections)}
+  {_section("Rollback", rollback_rows[:100], ROLLBACK_FIELDS, include_when_empty=include_empty_sections)}
+  {_section("LOB Summary", lob_rows[:100], LOB_FIELDS, include_when_empty=include_empty_sections)}
+  {_section("Object Dependency", dependency_rows[:100], DEPENDENCY_FIELDS, include_when_empty=include_empty_sections)}
+  {_section("MV / View Maintenance", maintenance_rows[:100], MAINTENANCE_FIELDS, include_when_empty=include_empty_sections)}
   <script>
     function filterTables() {{
       const query = document.getElementById('searchBox').value.toLowerCase();
@@ -284,7 +293,9 @@ def _table(rows: list[dict], fields: list[str]) -> str:
     return f"<table><thead><tr>{header}</tr></thead><tbody>{''.join(body)}</tbody></table>"
 
 
-def _section(title: str, rows: list[dict], fields: list[str]) -> str:
+def _section(title: str, rows: list[dict], fields: list[str], *, include_when_empty: bool) -> str:
+    if not rows and not include_when_empty:
+        return ""
     return f"<details open><summary>{escape(title)}</summary>{_table(rows, fields)}</details>"
 
 

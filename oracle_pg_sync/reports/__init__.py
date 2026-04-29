@@ -18,6 +18,7 @@ def write_audit_reports(
     from oracle_pg_sync.reports.writer_excel import write_inventory_xlsx
     from oracle_pg_sync.reports.writer_html import write_html_report
     from oracle_pg_sync.reports.writer_sql import write_schema_suggestions
+    from oracle_pg_sync.dependency_health import summarize_dependency_rows
 
     report_dir.mkdir(parents=True, exist_ok=True)
     write_csv(report_dir / "inventory_summary.csv", inventory_rows)
@@ -32,9 +33,12 @@ def write_audit_reports(
     )
     if sync_rows is not None:
         write_csv(report_dir / "sync_result.csv", sync_rows)
+    dependency_summary_rows = summarize_dependency_rows(dependency_rows, [])
     write_html_report(
         report_dir / "report.html",
         inventory_rows=inventory_rows,
         column_diff_rows=column_diff_rows,
         sync_rows=sync_rows,
+        dependency_rows=dependency_rows,
+        dependency_summary_rows=dependency_summary_rows,
     )

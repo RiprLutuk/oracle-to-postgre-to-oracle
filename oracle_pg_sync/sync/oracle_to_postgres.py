@@ -8,17 +8,35 @@ from typing import Any
 
 from psycopg import sql
 
-from oracle_pg_sync.checkpoint import CheckpointStore, Chunk, new_run_id
+from oracle_pg_sync.checkpoint import CheckpointStore, Chunk, RollbackAction, new_run_id
 from oracle_pg_sync.config import AppConfig, TableConfig
 from oracle_pg_sync.db import oracle, postgres
 from oracle_pg_sync.lob import apply_lob_mapping_policy, lob_summary_to_fields
 from oracle_pg_sync.metadata.compare import compare_table_metadata, inventory_has_fatal_mismatch
 from oracle_pg_sync.metadata.oracle_metadata import fetch_table_metadata as fetch_oracle_metadata
 from oracle_pg_sync.metadata.postgres_metadata import fetch_table_metadata as fetch_pg_metadata
-from oracle_pg_sync.sync.copy_loader import copy_rows
-from oracle_pg_sync.sync.staging import atomic_swap, create_staging_like, drop_table
+from oracle_pg_sync.sync.copy_loader import CopyMetrics, copy_rows
+from oracle_pg_sync.sync.staging import atomic_swap, create_backup_table, create_staging_like, drop_table
 from oracle_pg_sync.utils.naming import oracle_name, split_schema_table
 from oracle_pg_sync.validation import checksum_columns, checksum_result_row, stable_cursor_hash
+
+
+@dataclass
+class PendingWatermark:
+    direction: str
+    table_name: str
+    strategy: str
+    column_name: str
+    value: Any
+
+
+@dataclass
+class SafeLoadResult:
+    rows_loaded: int
+    staging_schema: str = ""
+    staging_table: str = ""
+    backup_table: str = ""
+    metrics: CopyMetrics = field(default_factory=CopyMetrics)
 
 
 @dataclass
@@ -48,6 +66,19 @@ class SyncResult:
     lob_type: str = ""
     lob_target_type: str = ""
     lob_validation_mode: str = ""
+    safe_mode: str = ""
+    validation_stage: str = ""
+    staging_table: str = ""
+    backup_table: str = ""
+    rollback_action: str = ""
+    rollback_available: bool = False
+    bytes_processed: int = 0
+    bytes_per_second: float | None = None
+    rows_per_second: float | None = None
+    lob_bytes_processed: int = 0
+    retry_attempts: int = 0
+    watermark_candidate: PendingWatermark | None = None
+    failed_tables: list[str] = field(default_factory=list)
 
     def as_row(self) -> dict[str, Any]:
         return {
@@ -76,6 +107,17 @@ class SyncResult:
             "lob_type": self.lob_type,
             "lob_target_type": self.lob_target_type,
             "lob_validation_mode": self.lob_validation_mode,
+            "safe_mode": self.safe_mode,
+            "validation_stage": self.validation_stage,
+            "staging_table": self.staging_table,
+            "backup_table": self.backup_table,
+            "rollback_action": self.rollback_action,
+            "rollback_available": self.rollback_available,
+            "bytes_processed": self.bytes_processed,
+            "bytes_per_second": self.bytes_per_second,
+            "rows_per_second": self.rows_per_second,
+            "lob_bytes_processed": self.lob_bytes_processed,
+            "retry_attempts": self.retry_attempts,
         }
 
 
@@ -104,6 +146,8 @@ class OracleToPostgresSync:
                 direction="oracle_to_postgres",
                 source_db=self.config.oracle.schema,
                 target_db=self.config.postgres.schema,
+                job_name=self.config.job.name,
+                mode=mode_override or self.config.sync.default_mode,
             )
         workers = max(1, int(self.config.sync.parallel_workers or 1))
         if workers == 1:
@@ -178,10 +222,12 @@ class OracleToPostgresSync:
             or table_cfg.mode
             or self.config.sync.default_mode
         ).lower()
+        mode = self._normalize_mode(mode, incremental=incremental or table_cfg.incremental.enabled)
         dry_run = not execute or self.config.sync.dry_run and not execute
 
         run_id = run_id or new_run_id()
         result = SyncResult(table.fqname, mode, "PENDING", dry_run=dry_run, run_id=run_id)
+        result.safe_mode = mode
         self.logger.info("Sync %s mode=%s dry_run=%s", table.fqname, mode, dry_run)
 
         try:
@@ -250,64 +296,218 @@ class OracleToPostgresSync:
 
                     chunks = self._plan_chunks(ocur, owner, source_table, table_cfg, effective_where)
                     successful = checkpoint_store.successful_chunks(run_id, table.fqname) if checkpoint_store and resume else set()
-                    if mode == "truncate":
-                        successful = self._truncate_resume_successful_chunks(
-                            table.fqname,
-                            successful,
-                            resume=resume,
+                    load_result = SafeLoadResult(rows_loaded=0)
+                    result.validation_stage = "planned"
+                    if checkpoint_store:
+                        checkpoint_store.record_event(
+                            run_id=run_id,
+                            table_name=table.fqname,
+                            phase="load_started",
+                            status="running",
+                            details={"mode": mode},
                         )
-                    truncate_strategy = (self.config.sync.truncate_resume_strategy or "restart_table").lower()
-                    if mode == "truncate" and truncate_strategy != "staging" and not successful:
-                        postgres.set_local_timeouts(
-                            pcur,
-                            lock_timeout=self.config.sync.pg_lock_timeout,
-                            statement_timeout=self.config.sync.pg_statement_timeout,
-                        )
-                        postgres.truncate_table(pcur, table.schema, table.table, cascade=self.config.sync.truncate_cascade)
 
-                    if mode == "truncate":
-                        self.logger.warning(
-                            "Mode truncate menjaga index/view dependency, tapi PostgreSQL mengambil ACCESS EXCLUSIVE lock. "
-                            "lock_timeout=%s",
-                            self.config.sync.pg_lock_timeout,
+                    if mode == "truncate_safe":
+                        load_result = self._sync_truncate_safe(
+                            ocur,
+                            pcur,
+                            owner,
+                            table.schema,
+                            source_table,
+                            table.table,
+                            mapping,
+                            chunks,
+                            checkpoint_store=checkpoint_store,
+                            run_id=run_id,
                         )
-                        if truncate_strategy == "staging":
-                            rows = self._sync_truncate_staging(
-                                ocur,
-                                pcur,
-                                owner,
-                                table.schema,
-                                source_table,
-                                table.table,
-                                mapping,
-                                chunks,
-                                checkpoint_store=checkpoint_store,
-                                run_id=run_id,
-                            )
-                        else:
-                            rows = self._copy_chunks(
-                                ocur,
-                                pcur,
-                                owner,
-                                table.schema,
-                                source_table,
-                                table.table,
-                                mapping,
-                                chunks,
-                                checkpoint_store=checkpoint_store,
-                                run_id=run_id,
-                                resume_successful=successful,
-                            )
-                    elif mode == "swap":
+                        result.validation_stage = "staging_loaded"
+                        result.staging_table = f"{load_result.staging_schema}.{load_result.staging_table}"
+                        checksum_rows = self._validate_checksum(
+                            ocur,
+                            pcur,
+                            owner,
+                            load_result.staging_schema,
+                            source_table,
+                            table.fqname,
+                            oracle_meta.columns,
+                            pg_meta.columns,
+                            effective_where,
+                            mapping,
+                            target_table=load_result.staging_table,
+                            force_enabled=True,
+                        )
+                        result.checksum_rows = checksum_rows
+                        if checksum_rows:
+                            _apply_checksum_summary(result, checksum_rows)
+                        result.oracle_row_count, result.postgres_row_count, result.row_count_match = self._safe_rowcount_validation(
+                            ocur,
+                            pcur,
+                            owner,
+                            source_table,
+                            load_result.staging_schema,
+                            load_result.staging_table,
+                            effective_where,
+                        )
+                        if result.checksum_status == "MISMATCH" or result.row_count_match is False:
+                            raise RuntimeError("staging validation failed before truncate_safe cutover")
+                        backup_table = self._apply_truncate_from_staging(
+                            pcur,
+                            schema=table.schema,
+                            target_table=table.table,
+                            staging_schema=load_result.staging_schema,
+                            staging_table=load_result.staging_table,
+                            columns=pg_columns,
+                            backup_before_truncate=self.config.sync.backup_before_truncate,
+                            run_id=run_id,
+                        )
+                        self._register_rollback_action(
+                            checkpoint_store,
+                            result,
+                            run_id=run_id,
+                            table_name=table.fqname,
+                            action_type="truncate_safe",
+                            target_schema=table.schema,
+                            target_table=table.table,
+                            backup_schema=table.schema,
+                            backup_table=backup_table,
+                            staging_schema=load_result.staging_schema,
+                            staging_table=load_result.staging_table,
+                        )
+                    elif mode == "swap_safe":
                         guard_message = self._swap_guard_message(table.fqname, swap_size, force=force)
                         if guard_message:
                             result.status = "SKIPPED"
                             result.message = guard_message
                             return result
                         self._log_swap_risk(table.fqname, swap_size)
-                        rows = self._sync_swap(ocur, pcur, owner, table.schema, table.table, mapping, effective_where)
+                        load_result = self._sync_swap_safe(
+                            ocur,
+                            pcur,
+                            owner,
+                            table.schema,
+                            table.table,
+                            mapping,
+                            effective_where,
+                            run_id=run_id,
+                        )
+                        result.validation_stage = "staging_loaded"
+                        result.staging_table = f"{load_result.staging_schema}.{load_result.staging_table}"
+                        checksum_rows = self._validate_checksum(
+                            ocur,
+                            pcur,
+                            owner,
+                            load_result.staging_schema,
+                            source_table,
+                            table.fqname,
+                            oracle_meta.columns,
+                            pg_meta.columns,
+                            effective_where,
+                            mapping,
+                            target_table=load_result.staging_table,
+                            force_enabled=True,
+                        )
+                        result.checksum_rows = checksum_rows
+                        if checksum_rows:
+                            _apply_checksum_summary(result, checksum_rows)
+                        result.oracle_row_count, result.postgres_row_count, result.row_count_match = self._safe_rowcount_validation(
+                            ocur,
+                            pcur,
+                            owner,
+                            source_table,
+                            load_result.staging_schema,
+                            load_result.staging_table,
+                            effective_where,
+                        )
+                        if result.checksum_status == "MISMATCH" or result.row_count_match is False:
+                            raise RuntimeError("staging validation failed before swap_safe cutover")
+                        backup_table = self._apply_swap_from_staging(
+                            pcur,
+                            schema=table.schema,
+                            table=table.table,
+                            staging_table=load_result.staging_table,
+                        )
+                        self._register_rollback_action(
+                            checkpoint_store,
+                            result,
+                            run_id=run_id,
+                            table_name=table.fqname,
+                            action_type="swap_safe",
+                            target_schema=table.schema,
+                            target_table=table.table,
+                            backup_schema=table.schema,
+                            backup_table=backup_table,
+                            staging_schema=load_result.staging_schema,
+                            staging_table=load_result.staging_table,
+                        )
+                    elif mode == "incremental_safe":
+                        load_result = self._sync_incremental_safe(
+                            ocur,
+                            pcur,
+                            owner,
+                            table.schema,
+                            source_table,
+                            table.table,
+                            mapping,
+                            table_cfg.key_columns,
+                            effective_where,
+                            run_id=run_id,
+                        )
+                        result.validation_stage = "staging_loaded"
+                        result.staging_table = f"{load_result.staging_schema}.{load_result.staging_table}"
+                        checksum_rows = self._validate_checksum(
+                            ocur,
+                            pcur,
+                            owner,
+                            load_result.staging_schema,
+                            source_table,
+                            table.fqname,
+                            oracle_meta.columns,
+                            pg_meta.columns,
+                            effective_where,
+                            mapping,
+                            target_table=load_result.staging_table,
+                            force_enabled=True,
+                        )
+                        result.checksum_rows = checksum_rows
+                        if checksum_rows:
+                            _apply_checksum_summary(result, checksum_rows)
+                        result.oracle_row_count, result.postgres_row_count, result.row_count_match = self._safe_rowcount_validation(
+                            ocur,
+                            pcur,
+                            owner,
+                            source_table,
+                            load_result.staging_schema,
+                            load_result.staging_table,
+                            effective_where,
+                        )
+                        if result.checksum_status == "MISMATCH" or result.row_count_match is False:
+                            raise RuntimeError("staging validation failed before incremental_safe apply")
+                        backup_table = self._apply_incremental_from_staging(
+                            pcur,
+                            schema=table.schema,
+                            target_table=table.table,
+                            staging_schema=load_result.staging_schema,
+                            staging_table=load_result.staging_table,
+                            columns=pg_columns,
+                            key_columns=table_cfg.key_columns,
+                            run_id=run_id,
+                        )
+                        self._register_rollback_action(
+                            checkpoint_store,
+                            result,
+                            run_id=run_id,
+                            table_name=table.fqname,
+                            action_type="incremental_safe",
+                            target_schema=table.schema,
+                            target_table=table.table,
+                            backup_schema=table.schema,
+                            backup_table=backup_table,
+                            staging_schema=load_result.staging_schema,
+                            staging_table=load_result.staging_table,
+                        )
                     elif mode == "append":
-                        rows = self._copy_chunks(
+                        load_result.metrics = CopyMetrics()
+                        load_result.rows_loaded = self._copy_chunks(
                             ocur,
                             pcur,
                             owner,
@@ -319,88 +519,33 @@ class OracleToPostgresSync:
                             checkpoint_store=checkpoint_store,
                             run_id=run_id,
                             resume_successful=successful,
+                            metrics=load_result.metrics,
                         )
-                    elif mode == "upsert":
-                        rows = self._sync_upsert(
+                        checksum_rows = self._validate_checksum(
                             ocur,
                             pcur,
                             owner,
                             table.schema,
                             source_table,
-                            table.table,
-                            mapping,
-                            table_cfg.key_columns,
+                            table.fqname,
+                            oracle_meta.columns,
+                            pg_meta.columns,
                             effective_where,
+                            mapping,
                         )
+                        result.checksum_rows = checksum_rows
+                        if checksum_rows:
+                            _apply_checksum_summary(result, checksum_rows)
                     else:
                         raise ValueError(f"Unsupported sync mode: {mode}")
 
-                    result.rows_loaded = rows
-                    if mode == "truncate":
-                        self._mark_table_phase(
-                            checkpoint_store,
-                            run_id,
-                            table.fqname,
-                            "table_loaded",
-                            rows_attempted=rows,
-                            rows_success=rows,
-                        )
-                    if self.config.sync.analyze_after_load:
+                    result.rows_loaded = load_result.rows_loaded
+                    if result.checksum_status == "MISMATCH":
+                        raise RuntimeError("checksum mismatch after load")
+                    result.status = "SUCCESS"
+                    if self.config.sync.analyze_after_load and mode in {"truncate_safe", "swap_safe", "incremental_safe"}:
                         postgres.analyze_table(pcur, table.schema, table.table)
-                    checksum_rows = self._validate_checksum(
-                        ocur,
-                        pcur,
-                        owner,
-                        table.schema,
-                        source_table,
-                        table.fqname,
-                        oracle_meta.columns,
-                        pg_meta.columns,
-                        effective_where,
-                        mapping,
-                    )
-                    if checksum_rows:
-                        result.checksum_rows = checksum_rows
-                        _apply_checksum_summary(result, checksum_rows)
-                        if result.checksum_status == "MISMATCH":
-                            result.status = "FAILED"
-                            result.message = "checksum mismatch after load"
-                            pcon.rollback()
-                            return result
-                    if mode == "truncate":
-                        self._mark_table_phase(
-                            checkpoint_store,
-                            run_id,
-                            table.fqname,
-                            "table_validated",
-                            rows_attempted=rows,
-                            rows_success=rows,
-                        )
-
-                    if self.config.sync.exact_count_after_load:
-                        result.oracle_row_count = oracle.count_rows(ocur, owner, source_table)
-                        result.postgres_row_count = postgres.count_rows(pcur, table.schema, table.table)
-                        result.row_count_match = result.oracle_row_count == result.postgres_row_count
-                        if not result.row_count_match:
-                            result.status = "WARNING"
-                            result.message = "rowcount berbeda setelah load"
-                        else:
-                            result.status = "SUCCESS"
-                    else:
-                        result.status = "SUCCESS"
-
-                    pcon.commit()
-                    if mode == "truncate":
-                        self._mark_table_phase(
-                            checkpoint_store,
-                            run_id,
-                            table.fqname,
-                            "table_committed",
-                            rows_attempted=rows,
-                            rows_success=rows,
-                        )
-                    self._update_watermark(
-                        checkpoint_store,
+                    result.watermark_candidate = self._build_watermark_candidate(
                         table_cfg,
                         table.fqname,
                         ocur,
@@ -409,14 +554,33 @@ class OracleToPostgresSync:
                         effective_where,
                         enabled=incremental or table_cfg.incremental.enabled,
                     )
+                    pcon.commit()
+                    if checkpoint_store:
+                        checkpoint_store.record_event(
+                            run_id=run_id,
+                            table_name=table.fqname,
+                            phase="table_committed",
+                            status="success",
+                            details={"mode": mode, "rows_loaded": result.rows_loaded},
+                        )
                     return result
         except Exception as exc:
             result.status = "FAILED"
             result.message = str(exc)
+            result.failed_tables = [table.fqname]
+            if checkpoint_store:
+                checkpoint_store.record_event(
+                    run_id=run_id,
+                    table_name=table.fqname,
+                    phase="table_failed",
+                    status="failed",
+                    message=str(exc),
+                )
             self.logger.exception("Sync failed for %s", table.fqname)
             return result
         finally:
             result.elapsed_seconds = time.time() - started
+            self._finalize_metrics(result, load_result.metrics if "load_result" in locals() else CopyMetrics())
 
     def _sync_truncate(
         self,
@@ -436,7 +600,7 @@ class OracleToPostgresSync:
         postgres.truncate_table(pcur, schema, table, cascade=self.config.sync.truncate_cascade)
         return self._copy_oracle_to_pg(ocur, pcur, owner, schema, table, table, mapping, where)
 
-    def _sync_truncate_staging(
+    def _sync_truncate_safe(
         self,
         ocur,
         pcur,
@@ -449,51 +613,45 @@ class OracleToPostgresSync:
         *,
         checkpoint_store: CheckpointStore | None,
         run_id: str,
-    ) -> int:
+    ) -> SafeLoadResult:
         postgres.set_local_timeouts(
             pcur,
             lock_timeout=self.config.sync.pg_lock_timeout,
             statement_timeout=self.config.sync.pg_statement_timeout,
         )
+        metrics = CopyMetrics()
         staging_schema, staging = create_staging_like(
             pcur,
             schema,
             target_table,
+            run_id=run_id,
             staging_schema=self.config.sync.staging_schema,
         )
-        try:
-            rows = self._copy_chunks(
-                ocur,
-                pcur,
-                owner,
-                staging_schema,
-                source_table,
-                staging,
-                mapping,
-                chunks,
-                checkpoint_store=checkpoint_store,
-                run_id=run_id,
-                resume_successful=set(),
-            )
-            if self.config.sync.analyze_after_load:
-                postgres.analyze_table(pcur, staging_schema, staging)
-            pg_columns = [pg_col for pg_col, _ in mapping]
-            postgres.truncate_table(pcur, schema, target_table, cascade=self.config.sync.truncate_cascade)
-            postgres.insert_from_table(
-                pcur,
-                target_schema=schema,
-                target_table=target_table,
-                source_schema=staging_schema,
-                source_table=staging,
-                columns=pg_columns,
-            )
-            drop_table(pcur, staging_schema, staging)
-            return rows
-        except Exception:
-            drop_table(pcur, staging_schema, staging)
-            raise
+        self._cleanup_staging_retention(pcur, staging_schema, target_table)
+        rows = self._copy_chunks(
+            ocur,
+            pcur,
+            owner,
+            staging_schema,
+            source_table,
+            staging,
+            mapping,
+            chunks,
+            checkpoint_store=checkpoint_store,
+            run_id=run_id,
+            resume_successful=set(),
+            metrics=metrics,
+        )
+        if self.config.sync.analyze_after_load:
+            postgres.analyze_table(pcur, staging_schema, staging)
+        return SafeLoadResult(
+            rows_loaded=rows,
+            staging_schema=staging_schema,
+            staging_table=staging,
+            metrics=metrics,
+        )
 
-    def _sync_swap(
+    def _sync_swap_safe(
         self,
         ocur,
         pcur,
@@ -502,27 +660,38 @@ class OracleToPostgresSync:
         table: str,
         mapping: list[tuple[str, str | None]],
         where: str | None,
-    ) -> int:
+        *,
+        run_id: str,
+    ) -> SafeLoadResult:
         postgres.set_local_timeouts(
             pcur,
             lock_timeout=self.config.sync.pg_lock_timeout,
             statement_timeout=self.config.sync.pg_statement_timeout,
         )
-        staging_schema, staging = create_staging_like(pcur, schema, table)
-        rows = self._copy_oracle_to_pg(ocur, pcur, owner, staging_schema, table, staging, mapping, where)
-        if self.config.sync.exact_count_after_load:
-            source_count = oracle.count_rows(ocur, owner, table)
-            staging_count = postgres.count_rows(pcur, staging_schema, staging)
-            if source_count != staging_count:
-                raise RuntimeError(f"staging rowcount mismatch Oracle={source_count} PG={staging_count}")
+        metrics = CopyMetrics()
+        staging_schema, staging = create_staging_like(pcur, schema, table, run_id=run_id)
+        self._cleanup_staging_retention(pcur, staging_schema, table)
+        rows = self._copy_oracle_to_pg(
+            ocur,
+            pcur,
+            owner,
+            staging_schema,
+            table,
+            staging,
+            mapping,
+            where,
+            metrics=metrics,
+        )
         if self.config.sync.analyze_after_load:
             postgres.analyze_table(pcur, staging_schema, staging)
-        old_table = atomic_swap(pcur, schema, table)
-        if not self.config.sync.keep_old_after_swap:
-            drop_table(pcur, schema, old_table)
-        return rows
+        return SafeLoadResult(
+            rows_loaded=rows,
+            staging_schema=staging_schema,
+            staging_table=staging,
+            metrics=metrics,
+        )
 
-    def _sync_upsert(
+    def _sync_incremental_safe(
         self,
         ocur,
         pcur,
@@ -533,11 +702,25 @@ class OracleToPostgresSync:
         mapping: list[tuple[str, str | None]],
         key_columns: list[str],
         where: str | None,
-    ) -> int:
+        *,
+        run_id: str,
+    ) -> SafeLoadResult:
         if not key_columns:
             raise ValueError(f"Mode upsert but key_columns is empty for {schema}.{target_table}")
-        staging_schema, staging = create_staging_like(pcur, schema, target_table)
-        rows = self._copy_oracle_to_pg(ocur, pcur, owner, staging_schema, source_table, staging, mapping, where)
+        metrics = CopyMetrics()
+        staging_schema, staging = create_staging_like(pcur, schema, target_table, run_id=run_id)
+        self._cleanup_staging_retention(pcur, staging_schema, target_table)
+        rows = self._copy_oracle_to_pg(
+            ocur,
+            pcur,
+            owner,
+            staging_schema,
+            source_table,
+            staging,
+            mapping,
+            where,
+            metrics=metrics,
+        )
         pg_columns = [pg_col for pg_col, _ in mapping]
         key_set = {k.lower() for k in key_columns}
         update_columns = [c for c in pg_columns if c.lower() not in key_set]
@@ -559,9 +742,84 @@ class OracleToPostgresSync:
             cols=sql.SQL(", ").join(sql.Identifier(c) for c in pg_columns),
             keys=sql.SQL(", ").join(sql.Identifier(c.lower()) for c in key_columns),
         )
+        return SafeLoadResult(
+            rows_loaded=rows,
+            staging_schema=staging_schema,
+            staging_table=staging,
+            metrics=metrics,
+        )
+
+    def _apply_truncate_from_staging(
+        self,
+        pcur,
+        *,
+        schema: str,
+        target_table: str,
+        staging_schema: str,
+        staging_table: str,
+        columns: list[str],
+        backup_before_truncate: bool,
+        run_id: str,
+    ) -> str:
+        backup_table = ""
+        if backup_before_truncate:
+            backup_table = create_backup_table(pcur, schema, target_table, token=run_id)
+        postgres.truncate_table(pcur, schema, target_table, cascade=self.config.sync.truncate_cascade)
+        postgres.insert_from_table(
+            pcur,
+            target_schema=schema,
+            target_table=target_table,
+            source_schema=staging_schema,
+            source_table=staging_table,
+            columns=columns,
+        )
+        drop_table(pcur, staging_schema, staging_table)
+        self._cleanup_backup_retention(pcur, schema, target_table)
+        return backup_table
+
+    def _apply_swap_from_staging(self, pcur, *, schema: str, table: str, staging_table: str) -> str:
+        backup_table = atomic_swap(pcur, schema, table, staging_table=staging_table)
+        self._cleanup_backup_retention(pcur, schema, table)
+        return backup_table
+
+    def _apply_incremental_from_staging(
+        self,
+        pcur,
+        *,
+        schema: str,
+        target_table: str,
+        staging_schema: str,
+        staging_table: str,
+        columns: list[str],
+        key_columns: list[str],
+        run_id: str,
+    ) -> str:
+        backup_table = create_backup_table(pcur, schema, target_table, token=run_id)
+        key_set = {k.lower() for k in key_columns}
+        update_columns = [c for c in columns if c.lower() not in key_set]
+        conflict_action = (
+            sql.SQL("DO UPDATE SET {}").format(
+                sql.SQL(", ").join(
+                    sql.SQL("{} = EXCLUDED.{}").format(sql.Identifier(c), sql.Identifier(c))
+                    for c in update_columns
+                )
+            )
+            if update_columns
+            else sql.SQL("DO NOTHING")
+        )
+        insert_stmt = sql.SQL(
+            "INSERT INTO {} ({cols}) SELECT {cols} FROM {} ON CONFLICT ({keys}) {}"
+        ).format(
+            table_ident(schema, target_table),
+            table_ident(staging_schema, staging_table),
+            conflict_action,
+            cols=sql.SQL(", ").join(sql.Identifier(c) for c in columns),
+            keys=sql.SQL(", ").join(sql.Identifier(c.lower()) for c in key_columns),
+        )
         pcur.execute(insert_stmt)
-        drop_table(pcur, staging_schema, staging)
-        return rows
+        drop_table(pcur, staging_schema, staging_table)
+        self._cleanup_backup_retention(pcur, schema, target_table)
+        return backup_table
 
     def _copy_oracle_to_pg(
         self,
@@ -573,6 +831,8 @@ class OracleToPostgresSync:
         target_table: str,
         mapping: list[tuple[str, str | None]],
         where: str | None,
+        *,
+        metrics: CopyMetrics | None = None,
     ) -> int:
         rows_cursor = oracle.select_rows(ocur, owner, source_table, mapping, where=where)
         pg_columns = [pg_col for pg_col, _ in mapping]
@@ -583,6 +843,7 @@ class OracleToPostgresSync:
             columns=pg_columns,
             rows=rows_cursor,
             lob_chunk_size_bytes=self.config.lob_strategy.lob_chunk_size_bytes,
+            metrics=metrics,
         )
 
     def _copy_chunks(
@@ -599,6 +860,7 @@ class OracleToPostgresSync:
         checkpoint_store: CheckpointStore | None,
         run_id: str,
         resume_successful: set[str],
+        metrics: CopyMetrics | None = None,
     ) -> int:
         total = 0
         for chunk in chunks:
@@ -625,6 +887,7 @@ class OracleToPostgresSync:
                     target_table,
                     mapping,
                     _chunk_where(chunk),
+                    metrics=metrics,
                 )
                 total += rows
                 if checkpoint_store:
@@ -792,9 +1055,8 @@ class OracleToPostgresSync:
             )
         raise ValueError(f"Unsupported incremental strategy: {cfg.strategy}")
 
-    def _update_watermark(
+    def _build_watermark_candidate(
         self,
-        checkpoint_store: CheckpointStore | None,
         table_cfg: TableConfig,
         table_name: str,
         ocur,
@@ -803,40 +1065,44 @@ class OracleToPostgresSync:
         where: str | None,
         *,
         enabled: bool,
-    ) -> None:
-        if not checkpoint_store or not enabled or not table_cfg.incremental.enabled:
-            return
+    ) -> PendingWatermark | None:
+        if not enabled or not table_cfg.incremental.enabled:
+            return None
         cfg = table_cfg.incremental
         if cfg.strategy == "oracle_scn" or not cfg.column:
-            return
+            return None
         value = oracle.max_value(ocur, owner, table, cfg.column, where=where)
         if value is not None:
-            checkpoint_store.set_watermark(
+            return PendingWatermark(
                 direction="oracle_to_postgres",
                 table_name=table_name,
                 strategy=cfg.strategy,
                 column_name=cfg.column,
                 value=value,
             )
+        return None
 
     def _validate_checksum(
         self,
         ocur,
         pcur,
         owner: str,
-        schema: str,
-        table: str,
+        target_schema: str,
+        source_table: str,
         fq_table: str,
         oracle_columns: list[Any],
         pg_columns_meta: list[Any],
         where: str | None,
         mapping: list[tuple[str, str | None]],
+        *,
+        target_table: str | None = None,
+        force_enabled: bool = False,
     ) -> list[dict[str, Any]]:
         cfg = self.config.validation.checksum
         table_cfg = self.config.table_config(fq_table)
         if table_cfg and table_cfg.validation.checksum.enabled:
             cfg = table_cfg.validation.checksum
-        if not cfg.enabled:
+        if not cfg.enabled and not force_enabled:
             return []
         pg_cols = checksum_columns(pg_columns_meta, configured=cfg.columns, exclude_columns=cfg.exclude_columns)
         mapped = [(pg_col, oracle_col) for pg_col, oracle_col in mapping if pg_col in pg_cols and oracle_col is not None]
@@ -851,7 +1117,7 @@ class OracleToPostgresSync:
             chunks = self._plan_chunks(
                 ocur,
                 owner,
-                table,
+                source_table,
                 table_cfg_for_chunks,
                 where,
                 chunk_key_override=chunk_key,
@@ -861,9 +1127,16 @@ class OracleToPostgresSync:
         elif mode != "table":
             raise ValueError(f"Unsupported checksum mode: {mode}")
         rows: list[dict[str, Any]] = []
+        pg_table = target_table or split_schema_table(fq_table, self.config.postgres.schema).table
         for chunk in chunks:
-            source_cursor = oracle.select_rows(ocur, owner, table, mapped, where=_chunk_where(chunk))
-            target_cursor = postgres.select_rows(pcur, schema, table, [pg_col for pg_col, _ in mapped], where=_chunk_where(chunk))
+            source_cursor = oracle.select_rows(ocur, owner, source_table, mapped, where=_chunk_where(chunk))
+            target_cursor = postgres.select_rows(
+                pcur,
+                target_schema,
+                pg_table,
+                [pg_col for pg_col, _ in mapped],
+                where=_chunk_where(chunk),
+            )
             source_hash, source_count = stable_cursor_hash(source_cursor, [pg for pg, _ in mapped], batch_size=batch_size)
             target_hash, target_count = stable_cursor_hash(target_cursor, [pg for pg, _ in mapped], batch_size=batch_size)
             rows.append(
@@ -956,6 +1229,92 @@ class OracleToPostgresSync:
                 return f"{size:.1f} {unit}"
             size /= 1024
         return f"{value} B"
+
+    def _normalize_mode(self, mode: str, *, incremental: bool) -> str:
+        value = str(mode or "").lower()
+        if value in {"truncate_safe", "swap_safe", "incremental_safe", "append"}:
+            return value
+        if value == "truncate":
+            return "truncate_safe"
+        if value == "swap":
+            return "swap_safe"
+        if value in {"upsert", "delete"} or incremental:
+            return "incremental_safe"
+        return value or "truncate_safe"
+
+    def _register_rollback_action(
+        self,
+        checkpoint_store: CheckpointStore | None,
+        result: SyncResult,
+        *,
+        run_id: str,
+        table_name: str,
+        action_type: str,
+        target_schema: str,
+        target_table: str,
+        backup_schema: str,
+        backup_table: str,
+        staging_schema: str,
+        staging_table: str,
+    ) -> None:
+        if not checkpoint_store or not backup_table:
+            return
+        result.rollback_available = True
+        result.rollback_action = action_type
+        result.backup_table = f"{backup_schema}.{backup_table}" if backup_schema and backup_table else backup_table
+        checkpoint_store.add_rollback_action(
+            RollbackAction(
+                run_id=run_id,
+                table_name=table_name,
+                direction="oracle_to_postgres",
+                action_type=action_type,
+                target_schema=target_schema,
+                target_table=target_table,
+                backup_schema=backup_schema,
+                backup_table=backup_table,
+                staging_schema=staging_schema,
+                staging_table=staging_table,
+            )
+        )
+
+    def _finalize_metrics(self, result: SyncResult, metrics: CopyMetrics) -> None:
+        result.bytes_processed = int(metrics.bytes_processed or 0)
+        result.lob_bytes_processed = int(metrics.lob_bytes_processed or 0)
+        if result.elapsed_seconds > 0:
+            result.rows_per_second = round(float(result.rows_loaded or 0) / result.elapsed_seconds, 3)
+            result.bytes_per_second = round(float(result.bytes_processed or 0) / result.elapsed_seconds, 3)
+
+    def _safe_rowcount_validation(
+        self,
+        ocur,
+        pcur,
+        owner: str,
+        source_table: str,
+        target_schema: str,
+        target_table: str,
+        where: str | None,
+    ) -> tuple[int, int, bool]:
+        source_count = oracle.count_rows_where(ocur, owner, source_table, where)
+        target_count = postgres.count_rows_where(pcur, target_schema, target_table)
+        return source_count, target_count, source_count == target_count
+
+    def _cleanup_backup_retention(self, pcur, schema: str, table: str) -> None:
+        keep = max(0, int(self.config.sync.backup_retention_count or 0))
+        if keep <= 0:
+            return
+        candidates = postgres.list_matching_tables(pcur, schema, f"{table}__backup_%")
+        if len(candidates) <= keep:
+            return
+        postgres.drop_tables(pcur, schema, candidates[keep:])
+
+    def _cleanup_staging_retention(self, pcur, schema: str, table: str) -> None:
+        keep = max(0, int(self.config.sync.staging_retention_count or 0))
+        if keep <= 0:
+            return
+        candidates = postgres.list_matching_tables(pcur, schema, f"_stg_{table}_%")
+        if len(candidates) <= keep:
+            return
+        postgres.drop_tables(pcur, schema, candidates[keep:])
 
 
 def table_ident(schema: str, table: str):

@@ -18,7 +18,7 @@ postgres:
   schema: ${PG_SCHEMA:-public}
 sync:
   default_direction: oracle-to-postgres
-  default_mode: truncate
+  default_mode: truncate_safe
   dry_run: true
   fast_count: true
   exact_count_after_load: false
@@ -39,17 +39,32 @@ sync:
   checkpoint_dir: reports/checkpoints/checkpoint.sqlite3
   truncate_resume_strategy: restart_table
   staging_schema: null
+  backup_before_truncate: true
+  backup_retention_count: 3
+  staging_retention_count: 5
+  max_failures: 3
+  cooldown_minutes: 30
 reports:
   output_dir: reports
 dependency:
   auto_recompile_oracle: true
   refresh_postgres_mview: true
   max_recompile_attempts: 3
+  max_attempts: 3
   fail_on_broken_dependency: true
 job:
+  name: oracle_to_pg_daily
   retry: 3
   timeout_seconds: 3600
   alert_command: echo FAILED
+  alert:
+    type: webhook
+    url: ''
+    on:
+      - failure
+      - repeated_failure
+      - dependency_error
+    timeout_seconds: 10
 validation:
   checksum:
     enabled: false

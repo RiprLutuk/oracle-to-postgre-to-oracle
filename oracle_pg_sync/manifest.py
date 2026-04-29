@@ -73,6 +73,9 @@ class RunManifest:
         checksum_rows: list[dict] | None = None,
         lob_rows: list[dict] | None = None,
         dependency_rows: list[dict] | None = None,
+        metrics_rows: list[dict] | None = None,
+        rollback_rows: list[dict] | None = None,
+        timeline_rows: list[dict] | None = None,
         report_files: list[str] | None = None,
         errors: list[str] | None = None,
     ) -> Path:
@@ -80,6 +83,9 @@ class RunManifest:
         checksum_rows = checksum_rows or []
         lob_rows = lob_rows or []
         dependency_rows = dependency_rows or []
+        metrics_rows = metrics_rows or []
+        rollback_rows = rollback_rows or []
+        timeline_rows = timeline_rows or []
         self.data["finished_at"] = utc_now()
         self.data["duration_seconds"] = round(time.time() - self.started, 3)
         self.data["tables_processed"] = len(result_rows)
@@ -94,6 +100,9 @@ class RunManifest:
         }
         self.data["lob_summary"] = summarize_lob_rows(lob_rows)
         self.data["dependency_summary"] = summarize_dependency_manifest(dependency_rows)
+        self.data["metrics_summary"] = summarize_metrics(metrics_rows)
+        self.data["rollback_summary"] = summarize_rollback(rollback_rows)
+        self.data["failure_timeline"] = timeline_rows
         self.data["report_files"] = report_files or []
         self.data["errors"] = errors or [str(row.get("message")) for row in result_rows if row.get("status") == "FAILED"]
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -169,6 +178,26 @@ def summarize_dependency_manifest(rows: list[dict]) -> dict[str, Any]:
         "invalid": sum(int(row.get("invalid_count") or 0) for row in rows),
         "missing": sum(int(row.get("missing_count") or 0) for row in rows),
         "failed": sum(int(row.get("failed_count") or 0) for row in rows),
+    }
+
+
+def summarize_metrics(rows: list[dict]) -> dict[str, Any]:
+    return {
+        "total_bytes_processed": sum(int(row.get("bytes_processed") or 0) for row in rows),
+        "total_lob_bytes_processed": sum(int(row.get("lob_bytes_processed") or 0) for row in rows),
+        "slow_tables": [row.get("table_name") for row in rows if float(row.get("elapsed_seconds") or 0) >= 300],
+        "average_rows_per_second": round(
+            sum(float(row.get("rows_per_second") or 0) for row in rows) / max(1, len(rows)),
+            3,
+        ),
+    }
+
+
+def summarize_rollback(rows: list[dict]) -> dict[str, Any]:
+    return {
+        "total": len(rows),
+        "success": sum(1 for row in rows if row.get("status") == "SUCCESS"),
+        "failed": sum(1 for row in rows if row.get("status") == "FAILED"),
     }
 
 

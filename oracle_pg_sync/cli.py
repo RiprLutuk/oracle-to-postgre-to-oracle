@@ -4,6 +4,7 @@ import argparse
 import atexit
 import csv
 import fcntl
+import json
 import logging
 import os
 import shutil
@@ -11,7 +12,9 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Any
 
+from oracle_pg_sync.alerting import send_alert
 from oracle_pg_sync.checkpoint import CheckpointStore, new_run_id
 from oracle_pg_sync.config import AppConfig, TableConfig, load_config
 from oracle_pg_sync.dependency_health import critical_dependency_rows, summarize_dependency_rows
@@ -54,7 +57,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["oracle-to-postgres", "postgres-to-oracle"],
         help="Arah sync. Default dari sync.default_direction.",
     )
-    sync.add_argument("--mode", choices=["truncate", "swap", "append", "upsert", "delete"], help="Override mode")
+    sync.add_argument(
+        "--mode",
+        choices=["truncate", "swap", "append", "upsert", "delete", "truncate_safe", "swap_safe", "incremental_safe"],
+        help="Override mode",
+    )
     sync.add_argument(
         "--where",
         help="Override WHERE filter for this sync run. Intended for one-table jobs, for example cron upsert windows.",
@@ -64,6 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--execute", "--go", dest="execute", action="store_true", help="Benar-benar eksekusi perubahan data")
     sync.add_argument("--lob", choices=["error", "skip", "null", "stream", "include"], help="Override default LOB strategy")
     sync.add_argument("--force", action="store_true", help="Tetap sync walaupun struktur mismatch")
+    sync.add_argument("--simulate", action="store_true", help="Risk simulation only; no data changes")
     _add_production_sync_args(sync)
 
     report = sub.add_parser("report", help="Generate report.html dari CSV latest run")
@@ -103,7 +111,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["oracle-to-postgres", "postgres-to-oracle"],
         help="Arah sync. Default dari sync.default_direction.",
     )
-    all_cmd.add_argument("--mode", choices=["truncate", "swap", "append", "upsert", "delete"], help="Override mode")
+    all_cmd.add_argument(
+        "--mode",
+        choices=["truncate", "swap", "append", "upsert", "delete", "truncate_safe", "swap_safe", "incremental_safe"],
+        help="Override mode",
+    )
     all_cmd.add_argument(
         "--where",
         help="Override WHERE filter for the sync step. Intended for one-table jobs.",
@@ -113,6 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd.add_argument("--execute", "--go", dest="execute", action="store_true", help="Benar-benar eksekusi perubahan data")
     all_cmd.add_argument("--lob", choices=["error", "skip", "null", "stream", "include"], help="Override default LOB strategy")
     all_cmd.add_argument("--force", action="store_true", help="Tetap sync walaupun struktur mismatch")
+    all_cmd.add_argument("--simulate", action="store_true", help="Risk simulation only; no data changes")
     _add_production_sync_args(all_cmd)
     all_cmd.add_argument("--fast-count", action="store_true", help="Use statistic count")
     all_cmd.add_argument("--exact-count", action="store_true", help="Use SELECT COUNT(1)")
@@ -206,6 +219,22 @@ def main(argv: list[str] | None = None) -> int:
     if not tables and args.command not in {"report", "audit-objects"}:
         raise SystemExit("Tidak ada table target. Isi config.tables atau pakai --tables.")
     _apply_runtime_table_overrides(args, config, tables)
+    job_key = _job_key(config, args, direction, tables) if args.command in {"sync", "all"} else ""
+
+    if args.command in {"sync", "all"}:
+        blocked = checkpoint_store.job_blocked(job_key, max_failures=config.sync.max_failures)
+        if blocked:
+            payload = _alert_payload(
+                run_id="",
+                direction=direction,
+                error=f"circuit breaker active until {blocked.get('cooldown_until')}",
+                failed_tables=tables,
+            )
+            send_alert(config, event="repeated_failure", payload=payload, logger=logger)
+            logger.error("Circuit breaker active for %s until %s", job_key, blocked.get("cooldown_until"))
+            return 1
+        if getattr(args, "simulate", False):
+            return _simulate_sync(config, tables, logger, direction=direction, mode=getattr(args, "mode", None))
 
     if args.command == "audit":
         from oracle_pg_sync.reports import write_audit_reports
@@ -234,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
             sql_suggestions_path=_sql_suggestions_path(run_dir, getattr(args, "sql_out", None)),
             suggest_drop=args.suggest_drop,
         )
-        _write_audit_run_reports(
+        dependency_summary_rows = _write_audit_run_reports(
             manifest,
             report_dir=report_dir,
             inventory_rows=audit_result.inventory_rows,
@@ -246,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         manifest_path = manifest.finish(
             result_rows=audit_result.inventory_rows,
+            dependency_rows=dependency_summary_rows,
             report_files=_run_report_files(
                 run_dir,
                 "inventory_summary.csv",
@@ -267,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
         from oracle_pg_sync.reports.writer_csv import write_csv
         from oracle_pg_sync.reports.writer_excel import write_central_report_xlsx, write_rows_xlsx
         from oracle_pg_sync.reports.writer_html import write_html_report
+        from oracle_pg_sync.rollback import rollback_run
 
         run_id = args.resume or new_run_id()
         manifest = RunManifest(
@@ -313,6 +344,35 @@ def main(argv: list[str] | None = None) -> int:
         dependency_rows = dependency_pre_rows + dependency_post_rows
         dependency_summary_rows = _write_dependency_summary(run_dir, dependency_rows, maintenance_rows)
         dependency_failed = _dependency_failed(config, dependency_rows + maintenance_rows)
+        rollback_rows: list[dict] = []
+        table_failed = any(row["status"] == "FAILED" for row in rows)
+        run_failed = dependency_failed or table_failed
+        if args.execute and dependency_failed:
+            rollback_rows = rollback_run(config, checkpoint_store, run_id=run_id, logger=logger)
+            write_csv(run_dir / "rollback_result.csv", rollback_rows)
+        if args.execute and not run_failed:
+            _apply_watermark_updates(checkpoint_store, results)
+            checkpoint_store.clear_job_failures(job_key)
+        elif args.execute:
+            checkpoint_store.register_job_failure(
+                job_key,
+                cooldown_minutes=config.sync.cooldown_minutes,
+                error_message=_first_error(rows, maintenance_rows, dependency_failed),
+            )
+            event = "dependency_error" if dependency_failed else "failure"
+            send_alert(
+                config,
+                event=event,
+                payload=_alert_payload(
+                    run_id=run_id,
+                    direction=direction,
+                    error=_first_error(rows, maintenance_rows, dependency_failed),
+                    failed_tables=[row["table_name"] for row in rows if row.get("status") == "FAILED"],
+                ),
+                logger=logger,
+            )
+        metrics_rows = _metrics_rows(results, rollback_rows)
+        _write_metrics_json(run_dir, metrics_rows)
         _write_run_reports(
             manifest,
             report_dir=report_dir,
@@ -323,6 +383,8 @@ def main(argv: list[str] | None = None) -> int:
             maintenance_rows=maintenance_rows,
             watermark_rows=checkpoint_store.list_watermarks(),
             checkpoint_rows=checkpoint_store.list_chunks(run_id),
+            rollback_rows=rollback_rows,
+            timeline_rows=checkpoint_store.list_events(run_id),
             config=config,
             write_central_report_xlsx=write_central_report_xlsx,
             write_html_report=write_html_report,
@@ -332,16 +394,21 @@ def main(argv: list[str] | None = None) -> int:
             checksum_rows=checksum_rows,
             lob_rows=rows,
             dependency_rows=dependency_summary_rows,
+            metrics_rows=metrics_rows,
+            rollback_rows=rollback_rows,
+            timeline_rows=checkpoint_store.list_events(run_id),
             report_files=_run_report_files(
                 run_dir,
                 "sync_result.csv",
                 "sync_result.xlsx",
                 "validation_checksum.csv",
                 "validation_checksum.xlsx",
+                "metrics.json",
                 "dependency_pre.csv",
                 "dependency_post.csv",
                 "dependency_maintenance.csv",
                 "dependency_summary.csv",
+                "rollback_result.csv",
                 "report.xlsx",
                 "report.html",
                 "logs.txt",
@@ -350,7 +417,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("Manifest dibuat: %s", manifest_path)
         logger.info("Sync selesai. SUCCESS=%s FAILED=%s SKIPPED=%s DRY_RUN=%s",
                     _count(rows, "SUCCESS"), _count(rows, "FAILED"), _count(rows, "SKIPPED"), _count(rows, "DRY_RUN"))
-        return 1 if dependency_failed or any(row["status"] == "FAILED" for row in rows) else 0
+        return 1 if run_failed else 0
 
     if args.command == "report":
         from oracle_pg_sync.reports.writer_html import write_html_report
@@ -361,8 +428,14 @@ def main(argv: list[str] | None = None) -> int:
         sync_rows = _read_csv(source_dir / "sync_result.csv")
         checksum_rows = _read_csv(source_dir / "validation_checksum.csv")
         dependency_rows = _read_csv(source_dir / "dependency_pre.csv") + _read_csv(source_dir / "dependency_post.csv")
+        if not dependency_rows:
+            dependency_rows = _read_csv(source_dir / "object_dependency_summary.csv") + _read_csv(
+                source_dir / "table_object_dependencies.csv"
+            )
         maintenance_rows = _read_csv(source_dir / "dependency_maintenance.csv")
         dependency_summary_rows = _read_csv(source_dir / "dependency_summary.csv")
+        if not dependency_summary_rows and dependency_rows:
+            dependency_summary_rows = summarize_dependency_rows(dependency_rows, maintenance_rows)
         write_html_report(
             source_dir / "report.html",
             inventory_rows=inventory_rows,
@@ -470,6 +543,7 @@ def main(argv: list[str] | None = None) -> int:
         from oracle_pg_sync.reports.writer_csv import write_csv
         from oracle_pg_sync.reports.writer_excel import write_central_report_xlsx, write_rows_xlsx
         from oracle_pg_sync.reports.writer_html import write_html_report
+        from oracle_pg_sync.rollback import rollback_run
 
         run_id = args.resume or new_run_id()
         manifest = RunManifest(
@@ -522,6 +596,34 @@ def main(argv: list[str] | None = None) -> int:
         dependency_rows = dependency_pre_rows + dependency_post_rows
         dependency_summary_rows = _write_dependency_summary(run_dir, dependency_rows, maintenance_rows)
         dependency_failed = _dependency_failed(config, dependency_rows + maintenance_rows)
+        rollback_rows: list[dict] = []
+        sync_failed = any(row["status"] == "FAILED" for row in sync_rows)
+        run_failed = dependency_failed or sync_failed
+        if args.execute and dependency_failed:
+            rollback_rows = rollback_run(config, checkpoint_store, run_id=run_id, logger=logger)
+            write_csv(run_dir / "rollback_result.csv", rollback_rows)
+        if args.execute and not run_failed:
+            _apply_watermark_updates(checkpoint_store, sync_results)
+            checkpoint_store.clear_job_failures(job_key)
+        elif args.execute:
+            checkpoint_store.register_job_failure(
+                job_key,
+                cooldown_minutes=config.sync.cooldown_minutes,
+                error_message=_first_error(sync_rows, maintenance_rows, dependency_failed),
+            )
+            send_alert(
+                config,
+                event="dependency_error" if dependency_failed else "failure",
+                payload=_alert_payload(
+                    run_id=run_id,
+                    direction=direction,
+                    error=_first_error(sync_rows, maintenance_rows, dependency_failed),
+                    failed_tables=[row["table_name"] for row in sync_rows if row.get("status") == "FAILED"],
+                ),
+                logger=logger,
+            )
+        metrics_rows = _metrics_rows(sync_results, rollback_rows)
+        _write_metrics_json(run_dir, metrics_rows)
         logger.info("Step 3/3 audit ulang dan report")
         audit_result = run_audit(config, tables, logger, workers=args.workers)
         write_audit_reports(
@@ -547,6 +649,8 @@ def main(argv: list[str] | None = None) -> int:
             maintenance_rows=maintenance_rows,
             watermark_rows=checkpoint_store.list_watermarks(),
             checkpoint_rows=checkpoint_store.list_chunks(run_id),
+            rollback_rows=rollback_rows,
+            timeline_rows=checkpoint_store.list_events(run_id),
             config=config,
             write_central_report_xlsx=write_central_report_xlsx,
             write_html_report=write_html_report,
@@ -556,6 +660,9 @@ def main(argv: list[str] | None = None) -> int:
             checksum_rows=checksum_rows,
             lob_rows=sync_rows,
             dependency_rows=dependency_summary_rows,
+            metrics_rows=metrics_rows,
+            rollback_rows=rollback_rows,
+            timeline_rows=checkpoint_store.list_events(run_id),
             report_files=_run_report_files(
                 run_dir,
                 "pre_inventory_summary.csv",
@@ -565,6 +672,7 @@ def main(argv: list[str] | None = None) -> int:
                 "sync_result.xlsx",
                 "validation_checksum.csv",
                 "validation_checksum.xlsx",
+                "metrics.json",
                 "inventory_summary.csv",
                 "inventory_summary.xlsx",
                 "column_diff.csv",
@@ -574,6 +682,7 @@ def main(argv: list[str] | None = None) -> int:
                 "dependency_post.csv",
                 "dependency_maintenance.csv",
                 "dependency_summary.csv",
+                "rollback_result.csv",
                 "schema_suggestions.sql",
                 "report.xlsx",
                 "report.html",
@@ -581,7 +690,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
         )
         logger.info("Manifest dibuat: %s", manifest_path)
-        return 1 if dependency_failed or any(row["status"] == "FAILED" for row in sync_rows) else 0
+        return 1 if run_failed else 0
 
     return 2
 
@@ -984,18 +1093,47 @@ def _run_dependency_maintenance(
     try:
         with oracle.connect(config.oracle) as ocon, postgres.connect(config.postgres, autocommit=True) as pcon:
             with ocon.cursor() as ocur, pcon.cursor() as pcur:
-                if config.dependency.refresh_postgres_mview:
-                    rows.extend(postgres.refresh_materialized_views(pcur, dependency_rows))
-                if config.dependency.auto_recompile_oracle:
-                    attempts = max(1, int(config.dependency.max_recompile_attempts or 1))
-                    for attempt in range(1, attempts + 1):
+                attempts = max(
+                    1,
+                    int(getattr(config.dependency, "max_attempts", 0) or config.dependency.max_recompile_attempts or 1),
+                )
+                remaining_invalid = oracle.invalid_object_rows(ocur, config.oracle.schema) if hasattr(ocur, "execute") else [{}]
+                for attempt in range(1, attempts + 1):
+                    if config.dependency.refresh_postgres_mview:
+                        rows.extend({**row, "attempt": attempt} for row in postgres.refresh_materialized_views(pcur, dependency_rows))
+                    attempt_rows = []
+                    if config.dependency.auto_recompile_oracle:
                         attempt_rows = oracle.compile_invalid_objects(ocur, config.oracle.schema)
-                        rows.extend({**row, "attempt": attempt} for row in attempt_rows)
-                        ocon.commit()
-                        if not attempt_rows:
-                            break
-                else:
                     ocon.commit()
+                    post_attempt_invalid = oracle.invalid_object_rows(ocur, config.oracle.schema) if hasattr(ocur, "execute") else []
+                    remaining_keys = {
+                        (str(item.get("object_schema")), str(item.get("object_type")), str(item.get("object_name")))
+                        for item in post_attempt_invalid
+                    }
+                    for row in attempt_rows:
+                        key = (str(row.get("object_schema")), str(row.get("object_type")), str(row.get("object_name")))
+                        rows.append(
+                            {
+                                **row,
+                                "attempt": attempt,
+                                "maintenance_status": "fixed" if key not in remaining_keys else "failed",
+                                "validation_status": "valid" if key not in remaining_keys else "invalid",
+                            }
+                        )
+                    remaining_invalid = post_attempt_invalid
+                    if not remaining_invalid:
+                        break
+                if remaining_invalid:
+                    rows.extend(
+                        {
+                            **row,
+                            "attempt": attempts,
+                            "maintenance_status": "failed",
+                            "validation_status": "invalid",
+                            "error_message": row.get("status") or "still invalid after repair loop",
+                        }
+                        for row in remaining_invalid
+                    )
                 rows.extend(postgres.validate_dependent_objects(pcur, dependency_rows))
     except Exception as exc:
         logger.exception("Dependency maintenance failed")
@@ -1021,15 +1159,155 @@ def _checksum_rows_from_results(results: list, fallback_rows: list[dict]) -> lis
     return [row for row in fallback_rows if row.get("checksum_status")]
 
 
+def _apply_watermark_updates(checkpoint_store: CheckpointStore, results: list[Any]) -> None:
+    for result in results:
+        candidate = getattr(result, "watermark_candidate", None)
+        if not candidate:
+            continue
+        checkpoint_store.set_watermark(
+            direction=candidate.direction,
+            table_name=candidate.table_name,
+            strategy=candidate.strategy,
+            column_name=candidate.column_name,
+            value=candidate.value,
+        )
+
+
+def _metrics_rows(results: list[Any], rollback_rows: list[dict] | None = None) -> list[dict]:
+    rollback_rows = rollback_rows or []
+    metrics: list[dict] = []
+    for result in results:
+        metrics.append(
+            {
+                "table_name": getattr(result, "table_name", ""),
+                "mode": getattr(result, "mode", ""),
+                "status": getattr(result, "status", ""),
+                "elapsed_seconds": round(float(getattr(result, "elapsed_seconds", 0) or 0), 3),
+                "rows_loaded": int(getattr(result, "rows_loaded", 0) or 0),
+                "rows_per_second": getattr(result, "rows_per_second", None),
+                "bytes_processed": int(getattr(result, "bytes_processed", 0) or 0),
+                "bytes_per_second": getattr(result, "bytes_per_second", None),
+                "lob_bytes_processed": int(getattr(result, "lob_bytes_processed", 0) or 0),
+                "error_rate": 1.0 if getattr(result, "status", "") == "FAILED" else 0.0,
+                "rollback_available": bool(getattr(result, "rollback_available", False)),
+                "rollback_action": getattr(result, "rollback_action", ""),
+            }
+        )
+    if rollback_rows:
+        metrics.append(
+            {
+                "table_name": "__rollback__",
+                "mode": "",
+                "status": "SUCCESS" if all(row.get("status") == "SUCCESS" for row in rollback_rows) else "FAILED",
+                "elapsed_seconds": 0,
+                "rows_loaded": 0,
+                "rows_per_second": None,
+                "bytes_processed": 0,
+                "bytes_per_second": None,
+                "lob_bytes_processed": 0,
+                "error_rate": 0.0,
+                "rollback_available": True,
+                "rollback_action": "automatic",
+            }
+        )
+    return metrics
+
+
+def _write_metrics_json(run_dir: Path, metrics_rows: list[dict]) -> None:
+    payload = {
+        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "tables": metrics_rows,
+        "slow_tables": [row for row in metrics_rows if float(row.get("elapsed_seconds") or 0) >= 300],
+    }
+    (run_dir / "metrics.json").write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _first_error(rows: list[dict], maintenance_rows: list[dict], dependency_failed: bool) -> str:
+    for row in rows:
+        if row.get("status") == "FAILED" and row.get("message"):
+            return str(row["message"])
+    for row in maintenance_rows:
+        if row.get("error_message"):
+            return str(row["error_message"])
+    return "dependency validation failed" if dependency_failed else "sync failed"
+
+
+def _alert_payload(*, run_id: str, direction: str | None, error: str, failed_tables: list[str]) -> dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "direction": direction or "",
+        "error": error,
+        "failed_tables": failed_tables,
+    }
+
+
+def _job_key(config: AppConfig, args: argparse.Namespace, direction: str | None, tables: list[str]) -> str:
+    key = getattr(config.job, "name", "") or Path(getattr(args, "config", "config.yaml")).stem
+    return f"{key}:{getattr(args, 'command', '')}:{direction or ''}:{','.join(sorted(tables))}"
+
+
+def _simulate_sync(
+    config: AppConfig,
+    tables: list[str],
+    logger: logging.Logger,
+    *,
+    direction: str | None,
+    mode: str | None,
+) -> int:
+    from oracle_pg_sync.db import oracle, postgres
+    from oracle_pg_sync.metadata.oracle_metadata import fetch_table_metadata as fetch_oracle_metadata
+    from oracle_pg_sync.metadata.postgres_metadata import fetch_table_metadata as fetch_pg_metadata
+
+    rows: list[dict[str, Any]] = []
+    with oracle.connect(config.oracle) as ocon, postgres.connect(config.postgres, autocommit=True) as pcon:
+        with ocon.cursor() as ocur, pcon.cursor() as pcur:
+            dependency_rows = run_table_dependency_audit(config, tables, logger)
+            dependency_map: dict[str, int] = {}
+            for row in dependency_rows:
+                key = str(row.get("table_name") or "")
+                dependency_map[key] = dependency_map.get(key, 0) + 1
+            for table_name in tables:
+                table = split_schema_table(table_name, config.postgres.schema)
+                oracle_meta = fetch_oracle_metadata(ocur, owner=config.oracle.schema, table=table.table, fast_count=True)
+                pg_meta = fetch_pg_metadata(pcur, schema=table.schema, table=table.table, fast_count=True)
+                estimated_rows = int(oracle_meta.row_count or 0)
+                estimated_seconds = round(estimated_rows / 10000, 3) if estimated_rows else 0
+                relation_size = postgres.total_relation_size_bytes(pcur, table.schema, table.table) or 0
+                effective_mode = mode or (config.table_config(table_name).mode if config.table_config(table_name) else config.sync.default_mode)
+                risk = "low"
+                if dependency_map.get(table.fqname, 0) > 10 or relation_size > 1024**3:
+                    risk = "high"
+                elif relation_size > 100 * 1024**2 or dependency_map.get(table.fqname, 0) > 0:
+                    risk = "medium"
+                rows.append(
+                    {
+                        "table_name": table.fqname,
+                        "direction": direction or "",
+                        "mode": effective_mode,
+                        "estimated_rows": estimated_rows,
+                        "estimated_duration_seconds": estimated_seconds,
+                        "affected_tables": table.fqname,
+                        "dependency_impact": dependency_map.get(table.fqname, 0),
+                        "risk_level": risk,
+                    }
+                )
+    fields = list(rows[0].keys()) if rows else []
+    if fields:
+        print(",".join(fields))
+        for row in rows:
+            print(",".join(str(row.get(field, "")) for field in fields))
+    return 0
+
+
 def _apply_profile(args: argparse.Namespace) -> None:
     profile = getattr(args, "profile", None)
     if profile == "daily":
         if getattr(args, "mode", None) is None:
-            args.mode = "truncate"
+            args.mode = "truncate_safe"
         args.full_refresh = True
     elif profile == "every_5min":
         if getattr(args, "mode", None) is None:
-            args.mode = "upsert"
+            args.mode = "incremental_safe"
         args.incremental = True
 
 
@@ -1082,6 +1360,8 @@ def _write_run_reports(
     maintenance_rows: list[dict] | None = None,
     watermark_rows: list[dict] | None = None,
     checkpoint_rows: list[dict] | None = None,
+    rollback_rows: list[dict] | None = None,
+    timeline_rows: list[dict] | None = None,
     config: AppConfig,
     write_central_report_xlsx,
     write_html_report,
@@ -1100,6 +1380,8 @@ def _write_run_reports(
         maintenance_rows=maintenance_rows or [],
         watermark_rows=watermark_rows or [],
         checkpoint_rows=checkpoint_rows or [],
+        rollback_rows=rollback_rows or [],
+        timeline_rows=timeline_rows or [],
         config_sanitized=sanitize(config),
     )
     write_html_report(
@@ -1111,6 +1393,8 @@ def _write_run_reports(
         dependency_rows=dependency_rows or [],
         dependency_summary_rows=dependency_summary_rows or [],
         maintenance_rows=maintenance_rows or [],
+        rollback_rows=rollback_rows or [],
+        timeline_rows=timeline_rows or [],
     )
     _copy_log_to_run_dir(report_dir, run_dir)
 
@@ -1125,11 +1409,12 @@ def _write_audit_run_reports(
     dependency_rows: list[dict] | None = None,
     config: AppConfig,
     write_central_report_xlsx,
-) -> None:
+) -> list[dict]:
     from oracle_pg_sync.reports.writer_html import write_html_report
 
     run_dir = manifest.run_dir
     run_dir.mkdir(parents=True, exist_ok=True)
+    dependency_summary_rows = summarize_dependency_rows(dependency_rows or [], [])
     write_central_report_xlsx(
         run_dir / "report.xlsx",
         inventory_rows=inventory_rows or [],
@@ -1138,6 +1423,7 @@ def _write_audit_run_reports(
         sync_rows=[],
         checksum_rows=[],
         dependency_rows=dependency_rows or [],
+        dependency_summary_rows=dependency_summary_rows,
         config_sanitized=sanitize(config),
     )
     write_html_report(
@@ -1147,9 +1433,11 @@ def _write_audit_run_reports(
         sync_rows=[],
         checksum_rows=[],
         dependency_rows=dependency_rows or [],
+        dependency_summary_rows=dependency_summary_rows,
         maintenance_rows=[],
     )
     _copy_log_to_run_dir(report_dir, run_dir)
+    return dependency_summary_rows
 
 
 def _copy_log_to_run_dir(report_dir: Path, run_dir: Path) -> None:

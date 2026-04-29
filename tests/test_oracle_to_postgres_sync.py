@@ -83,6 +83,18 @@ class OracleToPostgresSyncTest(unittest.TestCase):
 
         self.assertEqual(successful, set())
 
+    def test_legacy_modes_normalize_to_safe_modes(self):
+        sync = OracleToPostgresSync(
+            AppConfig(
+                oracle=OracleConfig(schema="APP"),
+                postgres=PostgresConfig(schema="public"),
+            )
+        )
+
+        self.assertEqual(sync._normalize_mode("truncate", incremental=False), "truncate_safe")
+        self.assertEqual(sync._normalize_mode("swap", incremental=False), "swap_safe")
+        self.assertEqual(sync._normalize_mode("upsert", incremental=False), "incremental_safe")
+
 
 if __name__ == "__main__":
     unittest.main()

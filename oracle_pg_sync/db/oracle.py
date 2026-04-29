@@ -142,6 +142,14 @@ def count_rows(cur, owner: str, table: str) -> int:
     return int(cur.fetchone()[0])
 
 
+def count_rows_where(cur, owner: str, table: str, where: str | None = None) -> int:
+    query = f"SELECT COUNT(1) FROM {qident(owner.upper())}.{qident(_sql_table_name(cur, owner, table))}"
+    if where:
+        query += f" WHERE {where}"
+    cur.execute(query)
+    return int(cur.fetchone()[0])
+
+
 def min_max(cur, owner: str, table: str, column: str) -> tuple[Any, Any]:
     cur.execute(
         f"SELECT MIN({qident(column.upper())}), MAX({qident(column.upper())}) "

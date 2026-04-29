@@ -72,6 +72,23 @@ class WriterHtmlTest(unittest.TestCase):
         self.assertIn("Hide INFO rows", html)
         self.assertIn("severity-error", html)
 
+    def test_empty_sections_are_hidden_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "report.html"
+
+            write_html_report(
+                path,
+                inventory_rows=[{"table_name": "public.sample", "status": "MATCH"}],
+                column_diff_rows=[],
+                dependency_rows=[{"table_name": "public.sample", "object_schema": "public", "object_name": "sample_v", "object_type": "VIEW"}],
+            )
+
+            html = path.read_text(encoding="utf-8")
+
+        self.assertNotIn("No data.", html)
+        self.assertNotIn("Checksum Validation", html)
+        self.assertIn("Object Dependency", html)
+
 
 if __name__ == "__main__":
     unittest.main()

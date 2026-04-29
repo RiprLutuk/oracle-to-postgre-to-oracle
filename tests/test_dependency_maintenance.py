@@ -57,6 +57,30 @@ class PostgresDependencyMaintenanceTest(unittest.TestCase):
         self.assertEqual(len(cur.executed), 1)
         self.assertEqual(rows[0]["maintenance_status"], "refreshed")
 
+    def test_function_dependency_rows_fall_back_to_function_definition_heuristic(self):
+        class Cursor:
+            def execute(self, statement, params=None):
+                sql_text = str(statement)
+                if "JOIN pg_proc p ON p.oid = d.objid" in sql_text:
+                    self._rows = []
+                elif "pg_get_functiondef" in sql_text:
+                    self._rows = [
+                        ("public", "fn_sample", "f", "", "CREATE FUNCTION public.fn_sample() RETURNS int LANGUAGE sql AS $$ SELECT COUNT(*) FROM public.sample $$;"),
+                    ]
+                else:
+                    self._rows = []
+
+            def fetchall(self):
+                return list(self._rows)
+
+        cur = Cursor()
+
+        rows = postgres._function_dependency_rows(cur, "public", "sample")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["object_type"], "FUNCTION")
+        self.assertEqual(rows[0]["dependency_kind"], "function_definition_reference")
+
 
 class DependencyLifecycleTest(unittest.TestCase):
     def test_maintenance_order_is_refresh_compile_validate(self):
