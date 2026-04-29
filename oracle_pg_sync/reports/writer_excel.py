@@ -28,6 +28,7 @@ def write_central_report_xlsx(
     type_mismatch_rows: list[dict] | None = None,
     sync_rows: list[dict] | None = None,
     checksum_rows: list[dict] | None = None,
+    lob_rows: list[dict] | None = None,
     dependency_rows: list[dict] | None = None,
     maintenance_rows: list[dict] | None = None,
     watermark_rows: list[dict] | None = None,
@@ -40,6 +41,7 @@ def write_central_report_xlsx(
     type_mismatch_rows = type_mismatch_rows or []
     sync_rows = sync_rows or []
     checksum_rows = checksum_rows or []
+    lob_rows = lob_rows or [row for row in sync_rows if row.get("lob_columns_detected") or row.get("lob_type")]
     dependency_rows = dependency_rows or []
     maintenance_rows = maintenance_rows or []
     watermark_rows = watermark_rows or []
@@ -53,19 +55,19 @@ def write_central_report_xlsx(
         "02_Table_Sync_Status": table_status_rows,
         "03_Rowcount_Compare": rowcount_rows,
         "04_Checksum_Result": checksum_rows,
-        "05_Column_Structure_Diff": column_diff_rows + type_mismatch_rows,
+        "05_Column_Diff": column_diff_rows + type_mismatch_rows,
         "06_Index_Compare": _filter_dependency_rows(dependency_rows, {"INDEX"}),
-        "07_View_SP_Sequence": _filter_dependency_rows(
+        "07_Object_Dependency": _filter_dependency_rows(
             dependency_rows,
             {"VIEW", "MATERIALIZED VIEW", "PROCEDURE", "FUNCTION", "PACKAGE", "PACKAGE BODY", "SEQUENCE"},
         ),
-        "08_LOB_Columns": [row for row in sync_rows if row.get("lob_columns_detected")],
+        "08_LOB_Columns": lob_rows,
         "09_Failed_Tables": [row for row in table_status_rows if str(row.get("status", "")).upper() in {"FAILED", "MISMATCH", "MISSING"}],
         "10_Watermark": watermark_rows,
-        "11_Checkpoint_Resume": checkpoint_rows,
+        "11_Checkpoint": checkpoint_rows,
         "12_Performance": _performance_rows(sync_rows),
-        "13_Errors_Log": error_rows,
-        "14_Config_Sanitized": _flatten_config(config_sanitized or {}),
+        "13_Errors": error_rows,
+        "14_Config": _flatten_config(config_sanitized or {}),
     }
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for name, rows in sheets.items():

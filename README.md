@@ -233,16 +233,16 @@ Central Excel `report.xlsx` berisi sheet:
 - `02_Table_Sync_Status`
 - `03_Rowcount_Compare`
 - `04_Checksum_Result`
-- `05_Column_Structure_Diff`
+- `05_Column_Diff`
 - `06_Index_Compare`
-- `07_View_SP_Sequence`
+- `07_Object_Dependency`
 - `08_LOB_Columns`
 - `09_Failed_Tables`
 - `10_Watermark`
-- `11_Checkpoint_Resume`
+- `11_Checkpoint`
 - `12_Performance`
-- `13_Errors_Log`
-- `14_Config_Sanitized`
+- `13_Errors`
+- `14_Config`
 
 `report.html` menampilkan total table, jumlah `MATCH`, `WARNING`, `MISMATCH`,
 `MISSING`, top table rowcount terbesar, column mismatch, rowcount mismatch,
@@ -269,7 +269,9 @@ Untuk reverse upsert, `key_columns` bisa berasal dari config atau command `--key
 - Checksum validation dapat diaktifkan untuk mendeteksi mismatch data selain rowcount.
 - LOB sync default `error`; pilih `skip`, `null`, `stream`, atau `include` secara eksplisit.
   Oracle `BLOB`, `CLOB`, `NCLOB`, `LONG`, dan `LONG RAW` terdeteksi end-to-end.
-- DBA shortcut CLI tersedia sebagai `ops`, misalnya `ops sync --go --lob stream` dan `ops resume RUN_ID`.
+- DBA shortcut CLI tersedia sebagai `ops`, misalnya `ops sync --go --lob stream`,
+  `ops doctor`, `ops dependencies check`, `ops dependencies repair`,
+  `ops analyze lob`, dan `ops resume RUN_ID`.
 - Sync membuat dependency report sebelum dan sesudah load: `dependency_pre.csv` dan `dependency_post.csv`.
 - Saat execute, toolkit mencoba Oracle invalid object compile dan PostgreSQL MV refresh/validation.
 - Scheduler pack tersedia di `jobs/daily.sh` dan `jobs/every_5min.sh`; keduanya memakai `--profile`, lock file, dan log rotation.

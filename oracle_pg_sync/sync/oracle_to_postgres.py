@@ -719,16 +719,22 @@ class OracleToPostgresSync:
         chunk_size_override: int | None = None,
     ) -> list[Chunk]:
         key = [chunk_key_override] if chunk_key_override else (table_cfg.key_columns or table_cfg.primary_key or [])[:1]
+        table_fqname = split_schema_table(table_cfg.name, self.config.postgres.schema).fqname
         if not key:
-            return [Chunk(table_name=split_schema_table(table_cfg.name, self.config.postgres.schema).fqname, chunk_key="full", where=where)]
+            return [Chunk(table_name=table_fqname, chunk_key="full", where=where)]
         chunk_size = max(1, int(chunk_size_override or self.config.sync.chunk_size or 50000))
         column = key[0]
         try:
             min_value, max_value = oracle.min_max(ocur, owner, table, column)
         except Exception:
-            return [Chunk(table_name=split_schema_table(table_cfg.name, self.config.postgres.schema).fqname, chunk_key="full", where=where, primary_key=column)]
-        if min_value is None or max_value is None or not isinstance(min_value, int | float) or not isinstance(max_value, int | float):
-            return [Chunk(table_name=split_schema_table(table_cfg.name, self.config.postgres.schema).fqname, chunk_key="full", where=where, primary_key=column)]
+            return [Chunk(table_name=table_fqname, chunk_key="full", where=where, primary_key=column)]
+        if (
+            min_value is None
+            or max_value is None
+            or not isinstance(min_value, int | float)
+            or not isinstance(max_value, int | float)
+        ):
+            return [Chunk(table_name=table_fqname, chunk_key="full", where=where, primary_key=column)]
         chunks: list[Chunk] = []
         start = int(min_value)
         end_max = int(max_value)
@@ -761,7 +767,10 @@ class OracleToPostgresSync:
         if full_refresh or not (incremental or cfg.enabled):
             return None
         if cfg.strategy == "oracle_scn":
-            raise NotImplementedError("incremental.strategy=oracle_scn belum diimplementasikan; gunakan updated_at/numeric_key atau --full-refresh")
+            raise NotImplementedError(
+                "incremental.strategy=oracle_scn belum diimplementasikan; "
+                "gunakan updated_at/numeric_key atau --full-refresh"
+            )
         if not cfg.column:
             raise ValueError(f"Incremental enabled for {table_name} but incremental.column is empty")
         value = checkpoint_store.get_watermark(

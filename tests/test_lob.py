@@ -102,7 +102,15 @@ class LobStrategyTest(unittest.TestCase):
             config=config,
             table_cfg=TableConfig(
                 name="public.logs",
-                lob_strategy=LobStrategyConfig(columns={"MESSAGE": {"strategy": "stream", "target_type": "text", "validation": "size_hash"}}),
+                lob_strategy=LobStrategyConfig(
+                    columns={
+                        "MESSAGE": {
+                            "strategy": "stream",
+                            "target_type": "text",
+                            "validation": "size_hash",
+                        }
+                    }
+                ),
             ),
             table_name="public.logs",
             source_columns=[ColumnMeta("MESSAGE", 1, "NCLOB")],
@@ -138,7 +146,13 @@ class LobStrategyTest(unittest.TestCase):
 
         self.assertIn("DBMS_LOB.GETLENGTH", oracle_lob_validation_expressions("HOUSE_IMAGE", blob)["size"])
         self.assertIn("DBMS_CRYPTO.HASH", oracle_lob_validation_expressions("HOUSE_IMAGE", blob)["hash"])
-        self.assertIn("octet_length", postgres_lob_validation_expressions("house_image", ColumnMeta("house_image", 1, "bytea", udt_name="bytea"))["size"])
+        self.assertIn(
+            "octet_length",
+            postgres_lob_validation_expressions(
+                "house_image",
+                ColumnMeta("house_image", 1, "bytea", udt_name="bytea"),
+            )["size"],
+        )
         self.assertIn("skipped_with_reason", oracle_lob_validation_expressions("JSON_DATA", clob)["hash_validation_status"])
         self.assertIn("skipped_with_reason", oracle_lob_validation_expressions("MESSAGE", long_col)["hash_validation_status"])
 

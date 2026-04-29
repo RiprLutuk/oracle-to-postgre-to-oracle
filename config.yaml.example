@@ -41,6 +41,14 @@ sync:
   staging_schema: null
 reports:
   output_dir: reports
+dependency:
+  auto_recompile_oracle: true
+  refresh_postgres_mview: true
+  max_recompile_attempts: 3
+job:
+  retry: 3
+  timeout_seconds: 3600
+  alert_command: echo FAILED
 validation:
   checksum:
     enabled: false

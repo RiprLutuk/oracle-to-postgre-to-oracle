@@ -126,6 +126,36 @@ tables_file: configs/tables.yaml
         self.assertEqual(config.tables_file, Path("configs/tables.yaml"))
         self.assertEqual(config.table_names(), ["public.from_file"])
 
+    def test_load_dependency_and_job_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config.yaml"
+            path.write_text(
+                """
+oracle:
+  schema: APP
+postgres:
+  schema: public
+dependency:
+  auto_recompile_oracle: false
+  refresh_postgres_mview: false
+  max_recompile_attempts: 5
+job:
+  retry: 4
+  timeout_seconds: 7200
+  alert_command: echo ALERT
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(path)
+
+        self.assertFalse(config.dependency.auto_recompile_oracle)
+        self.assertFalse(config.dependency.refresh_postgres_mview)
+        self.assertEqual(config.dependency.max_recompile_attempts, 5)
+        self.assertEqual(config.job.retry, 4)
+        self.assertEqual(config.job.timeout_seconds, 7200)
+        self.assertEqual(config.job.alert_command, "echo ALERT")
+
     def test_tables_file_and_inline_tables_are_mutually_exclusive(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

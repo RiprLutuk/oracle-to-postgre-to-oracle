@@ -178,11 +178,27 @@ class ReportsConfig:
 
 
 @dataclass
+class DependencyConfig:
+    auto_recompile_oracle: bool = True
+    refresh_postgres_mview: bool = True
+    max_recompile_attempts: int = 3
+
+
+@dataclass
+class JobConfig:
+    retry: int = 3
+    timeout_seconds: int = 3600
+    alert_command: str = "echo FAILED"
+
+
+@dataclass
 class AppConfig:
     oracle: OracleConfig
     postgres: PostgresConfig
     sync: SyncConfig = field(default_factory=SyncConfig)
     reports: ReportsConfig = field(default_factory=ReportsConfig)
+    dependency: DependencyConfig = field(default_factory=DependencyConfig)
+    job: JobConfig = field(default_factory=JobConfig)
     tables: list[TableConfig] = field(default_factory=list)
     tables_file: Path | None = None
     rename_columns: dict[str, dict[str, str]] = field(default_factory=dict)
@@ -263,6 +279,8 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
     sync = SyncConfig(**sync_raw)
     reports_raw = raw.get("reports") or {}
     reports = ReportsConfig(output_dir=Path(reports_raw.get("output_dir", "reports")))
+    dependency = DependencyConfig(**(raw.get("dependency") or {}))
+    job = JobConfig(**(raw.get("job") or {}))
     tables_file = Path(raw["tables_file"]) if raw.get("tables_file") else None
     tables = _load_tables_config(raw, config_path, tables_file)
     rename_columns = {
@@ -274,6 +292,8 @@ def load_config(path: str | Path = "config.yaml") -> AppConfig:
         postgres=postgres,
         sync=sync,
         reports=reports,
+        dependency=dependency,
+        job=job,
         tables=tables,
         tables_file=tables_file,
         rename_columns=rename_columns,

@@ -136,6 +136,13 @@ Saat `--execute` dipakai, lifecycle otomatis adalah:
 
 Semua hasil maintenance masuk ke `dependency_maintenance.csv`.
 
+Shortcut DBA:
+
+```bash
+ops dependencies check --config config.yaml --tables public.address
+ops dependencies repair --config config.yaml --tables public.address
+```
+
 ### Manual Review
 
 Tetap review manual sebelum execute jika:

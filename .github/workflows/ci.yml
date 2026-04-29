@@ -32,6 +32,7 @@ jobs:
           oracle-pg-sync-audit --help
           ops --help
           ops sync --help
+          ops doctor --offline --config config.yaml.example
           ops report latest --config config.yaml.example
 
       - name: Compile

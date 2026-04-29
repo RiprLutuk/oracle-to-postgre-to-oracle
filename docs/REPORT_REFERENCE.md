@@ -75,16 +75,17 @@ Sheet:
 - `02_Table_Sync_Status`: status per table dari sync atau inventory audit.
 - `03_Rowcount_Compare`: rowcount Oracle/PostgreSQL dan status match.
 - `04_Checksum_Result`: hasil checksum table/chunk.
-- `05_Column_Structure_Diff`: missing/extra/ordinal/type mismatch.
+- `05_Column_Diff`: missing/extra/ordinal/type mismatch.
 - `06_Index_Compare`: dependency/index rows yang terdeteksi.
-- `07_View_SP_Sequence`: view, materialized view, procedure, function, package, dan sequence dependency.
-- `08_LOB_Columns`: kolom LOB terdeteksi, strategy, target type, dan validation mode.
+- `07_Object_Dependency`: view, materialized view, procedure, function, package, dan sequence dependency.
+- `08_LOB_Columns`: kolom LOB dari sync atau `ops analyze lob`, strategy,
+  target type, validation mode, classification, warning, dan recommendation.
 - `09_Failed_Tables`: table dengan status `FAILED`, `MISMATCH`, atau `MISSING`.
 - `10_Watermark`: watermark tersimpan saat run ditulis.
-- `11_Checkpoint_Resume`: chunk/checkpoint status.
+- `11_Checkpoint`: chunk/checkpoint status.
 - `12_Performance`: elapsed time, rows loaded, dan rows/second.
-- `13_Errors_Log`: error sync dan dependency maintenance.
-- `14_Config_Sanitized`: config sanitized untuk audit trail.
+- `13_Errors`: error sync dan dependency maintenance.
+- `14_Config`: config sanitized untuk audit trail.
 
 `run_<timestamp>_<run_id>/report.html`
 

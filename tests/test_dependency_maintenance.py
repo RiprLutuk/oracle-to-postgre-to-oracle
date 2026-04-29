@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from oracle_pg_sync.db import oracle, postgres
 from oracle_pg_sync.cli import _run_dependency_maintenance
-from oracle_pg_sync.config import AppConfig, OracleConfig, PostgresConfig
+from oracle_pg_sync.config import AppConfig, DependencyConfig, OracleConfig, PostgresConfig
 
 
 class OracleDependencyMaintenanceTest(unittest.TestCase):
@@ -75,11 +75,22 @@ class DependencyLifecycleTest(unittest.TestCase):
                 calls.append("commit")
 
         with tempfile.TemporaryDirectory() as tmp:
-            with patch("oracle_pg_sync.db.oracle.connect", return_value=Conn()), \
-                patch("oracle_pg_sync.db.postgres.connect", return_value=Conn()), \
-                patch("oracle_pg_sync.db.postgres.refresh_materialized_views", side_effect=lambda cur, rows: calls.append("refresh") or []), \
-                patch("oracle_pg_sync.db.oracle.compile_invalid_objects", side_effect=lambda cur, owner: calls.append("compile") or []), \
-                patch("oracle_pg_sync.db.postgres.validate_dependent_objects", side_effect=lambda cur, rows: calls.append("validate") or []):
+            with (
+                patch("oracle_pg_sync.db.oracle.connect", return_value=Conn()),
+                patch("oracle_pg_sync.db.postgres.connect", return_value=Conn()),
+                patch(
+                    "oracle_pg_sync.db.postgres.refresh_materialized_views",
+                    side_effect=lambda cur, rows: calls.append("refresh") or [],
+                ),
+                patch(
+                    "oracle_pg_sync.db.oracle.compile_invalid_objects",
+                    side_effect=lambda cur, owner: calls.append("compile") or [],
+                ),
+                patch(
+                    "oracle_pg_sync.db.postgres.validate_dependent_objects",
+                    side_effect=lambda cur, rows: calls.append("validate") or [],
+                ),
+            ):
                 _run_dependency_maintenance(
                     AppConfig(oracle=OracleConfig(schema="APP"), postgres=PostgresConfig(schema="public")),
                     ["public.sample"],
@@ -90,6 +101,58 @@ class DependencyLifecycleTest(unittest.TestCase):
                 )
 
         self.assertEqual(calls, ["refresh", "compile", "commit", "validate"])
+
+    def test_maintenance_respects_dependency_config(self):
+        calls = []
+
+        class Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def cursor(self):
+                return self
+
+            def commit(self):
+                calls.append("commit")
+
+        config = AppConfig(
+            oracle=OracleConfig(schema="APP"),
+            postgres=PostgresConfig(schema="public"),
+            dependency=DependencyConfig(
+                auto_recompile_oracle=False,
+                refresh_postgres_mview=False,
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("oracle_pg_sync.db.oracle.connect", return_value=Conn()),
+                patch("oracle_pg_sync.db.postgres.connect", return_value=Conn()),
+                patch(
+                    "oracle_pg_sync.db.postgres.refresh_materialized_views",
+                    side_effect=lambda *args: calls.append("refresh") or [],
+                ),
+                patch(
+                    "oracle_pg_sync.db.oracle.compile_invalid_objects",
+                    side_effect=lambda *args: calls.append("compile") or [],
+                ),
+                patch(
+                    "oracle_pg_sync.db.postgres.validate_dependent_objects",
+                    side_effect=lambda *args: calls.append("validate") or [],
+                ),
+            ):
+                _run_dependency_maintenance(
+                    config,
+                    ["public.sample"],
+                    __import__("logging").getLogger("test_dependency_config"),
+                    Path(tmp),
+                    [],
+                    execute=True,
+                )
+
+        self.assertEqual(calls, ["commit", "validate"])
 
 
 if __name__ == "__main__":

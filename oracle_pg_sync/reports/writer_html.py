@@ -4,6 +4,51 @@ from collections import Counter
 from html import escape
 from pathlib import Path
 
+DEPENDENCY_HEAVY_FIELDS = [
+    "table_name",
+    "view_count_related_oracle",
+    "view_count_related_postgres",
+    "stored_procedure_count_related_oracle",
+    "function_count_related_postgres",
+]
+LOB_FIELDS = [
+    "source_db",
+    "table_name",
+    "classification",
+    "column_name",
+    "lob_columns_detected",
+    "lob_columns_synced",
+    "lob_type",
+    "target_type",
+    "lob_target_type",
+    "strategy",
+    "lob_strategy_applied",
+    "validation_mode",
+    "lob_validation_mode",
+    "warning",
+    "suggestion",
+]
+DEPENDENCY_FIELDS = [
+    "phase",
+    "source_db",
+    "table_name",
+    "object_schema",
+    "object_type",
+    "object_name",
+    "dependency_kind",
+    "details",
+]
+MAINTENANCE_FIELDS = [
+    "source_db",
+    "object_schema",
+    "object_type",
+    "object_name",
+    "maintenance_status",
+    "validation_status",
+    "compile_status",
+    "error_message",
+]
+
 
 def write_html_report(
     path: Path,
@@ -12,6 +57,7 @@ def write_html_report(
     column_diff_rows: list[dict],
     sync_rows: list[dict] | None = None,
     checksum_rows: list[dict] | None = None,
+    lob_rows: list[dict] | None = None,
     dependency_rows: list[dict] | None = None,
     maintenance_rows: list[dict] | None = None,
 ) -> None:
@@ -28,7 +74,7 @@ def write_html_report(
     checksum_rows = checksum_rows or [row for row in sync_rows if row.get("checksum_status")]
     dependency_rows = dependency_rows or []
     maintenance_rows = maintenance_rows or []
-    lob_rows = [row for row in sync_rows if row.get("lob_columns_detected")]
+    lob_rows = lob_rows or [row for row in sync_rows if row.get("lob_columns_detected") or row.get("lob_type")]
     dependency_heavy = sorted(
         inventory_rows,
         key=lambda row: int(row.get("view_count_related_oracle") or 0)
@@ -38,12 +84,20 @@ def write_html_report(
         reverse=True,
     )[:10]
     manifests = sorted(path.parent.glob("run_*/manifest.json"), reverse=True)
-    manifest_link = f'<a href="manifest.json">manifest.json</a>' if (path.parent / "manifest.json").exists() or path.parent.name.startswith("run_") else (
-        f'<a href="{escape(str(manifests[0].relative_to(path.parent)))}">manifest.json</a>'
-        if manifests
+    manifest_link = (
+        f'<a href="manifest.json">manifest.json</a>'
+        if (path.parent / "manifest.json").exists() or path.parent.name.startswith("run_")
+        else (
+            f'<a href="{escape(str(manifests[0].relative_to(path.parent)))}">manifest.json</a>'
+            if manifests
+            else ""
+        )
+    )
+    workbook_link = (
+        '<a href="report.xlsx">report.xlsx</a>'
+        if (path.parent / "report.xlsx").exists()
         else ""
     )
-    workbook_link = '<a href="report.xlsx">report.xlsx</a>' if (path.parent / "report.xlsx").exists() else ""
     links = " | ".join(item for item in [manifest_link, workbook_link] if item)
     links_html = f"<p>{links}</p>" if links else ""
 
@@ -55,11 +109,26 @@ def write_html_report(
   <style>
     body {{ font-family: Arial, sans-serif; margin: 24px; color: #1f2937; }}
     h1, h2 {{ margin-bottom: 8px; }}
-    .metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 16px 0 24px; }}
-    .metric {{ border: 1px solid #d1d5db; border-radius: 6px; padding: 12px; background: #f9fafb; }}
+    .metrics {{
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 12px;
+      margin: 16px 0 24px;
+    }}
+    .metric {{
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      padding: 12px;
+      background: #f9fafb;
+    }}
     .metric strong {{ display: block; font-size: 24px; margin-top: 4px; }}
     table {{ border-collapse: collapse; width: 100%; margin: 12px 0 28px; font-size: 13px; }}
-    th, td {{ border: 1px solid #d1d5db; padding: 6px 8px; text-align: left; vertical-align: top; }}
+    th, td {{
+      border: 1px solid #d1d5db;
+      padding: 6px 8px;
+      text-align: left;
+      vertical-align: top;
+    }}
     th {{ background: #eef2f7; }}
     tr:nth-child(even) {{ background: #fafafa; }}
   </style>
@@ -81,17 +150,17 @@ def write_html_report(
   <h2>Rowcount Mismatch</h2>
   {_table(rowcount_mismatch[:100], ["table_name", "oracle_row_count", "postgres_row_count", "status"])}
   <h2>Dependency Object Terbanyak</h2>
-  {_table(dependency_heavy, ["table_name", "view_count_related_oracle", "view_count_related_postgres", "stored_procedure_count_related_oracle", "function_count_related_postgres"])}
+  {_table(dependency_heavy, DEPENDENCY_HEAVY_FIELDS)}
   <h2>Sync Bermasalah</h2>
   {_table(failed_sync[:100], ["table_name", "mode", "status", "rows_loaded", "message"])}
   <h2>Checksum Validation</h2>
   {_table(checksum_rows[:100], ["table_name", "chunk_key", "status", "row_count_source", "row_count_target", "source_hash", "target_hash"])}
   <h2>LOB Summary</h2>
-  {_table(lob_rows[:100], ["table_name", "lob_columns_detected", "lob_columns_synced", "lob_type", "lob_target_type", "lob_strategy_applied", "lob_validation_mode"])}
+  {_table(lob_rows[:100], LOB_FIELDS)}
   <h2>Object Dependency</h2>
-  {_table(dependency_rows[:100], ["phase", "source_db", "table_name", "object_schema", "object_type", "object_name", "dependency_kind", "details"])}
+  {_table(dependency_rows[:100], DEPENDENCY_FIELDS)}
   <h2>MV / View Maintenance</h2>
-  {_table(maintenance_rows[:100], ["source_db", "object_schema", "object_type", "object_name", "maintenance_status", "validation_status", "compile_status", "error_message"])}
+  {_table(maintenance_rows[:100], MAINTENANCE_FIELDS)}
 </body>
 </html>
 """
