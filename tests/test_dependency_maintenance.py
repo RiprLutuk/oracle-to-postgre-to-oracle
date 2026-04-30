@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from oracle_pg_sync.db import oracle, postgres
-from oracle_pg_sync.cli import _dependency_failed, _run_dependency_maintenance, _write_dependency_summary
+from oracle_pg_sync.cli import _dependency_failed, _run_dependency_maintenance, _unique_dependency_objects, _write_dependency_summary
 from oracle_pg_sync.config import AppConfig, DependencyConfig, OracleConfig, PostgresConfig
 from oracle_pg_sync.dependency_health import critical_dependency_rows, summarize_dependency_rows
 
@@ -80,6 +80,31 @@ class PostgresDependencyMaintenanceTest(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["object_type"], "FUNCTION")
         self.assertEqual(rows[0]["dependency_kind"], "function_definition_reference")
+
+    def test_validate_dependent_objects_deduplicates_dependencies(self):
+        class Cursor:
+            def __init__(self):
+                self.executed = 0
+
+            def execute(self, statement, params=None):
+                self.executed += 1
+                self._row = (1,)
+
+            def fetchone(self):
+                return self._row
+
+        cur = Cursor()
+
+        rows = postgres.validate_dependent_objects(
+            cur,
+            [
+                {"object_schema": "public", "object_name": "mv_sales", "object_type": "MATERIALIZED VIEW"},
+                {"object_schema": "public", "object_name": "mv_sales", "object_type": "MATERIALIZED VIEW"},
+            ],
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(cur.executed, 1)
 
 
 class DependencyLifecycleTest(unittest.TestCase):
@@ -178,6 +203,83 @@ class DependencyLifecycleTest(unittest.TestCase):
                 )
 
         self.assertEqual(calls, ["commit", "validate"])
+
+    def test_maintenance_refreshes_materialized_views_once_across_compile_attempts(self):
+        calls = []
+
+        class Conn:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def cursor(self):
+                return self
+
+            def execute(self, statement, params=None):
+                return None
+
+            def commit(self):
+                calls.append("commit")
+
+        invalid_after_attempt = [
+            [{"source_db": "oracle", "object_schema": "APP", "object_type": "VIEW", "object_name": "V_BAD", "status": "INVALID"}],
+            [{"source_db": "oracle", "object_schema": "APP", "object_type": "VIEW", "object_name": "V_BAD", "status": "INVALID"}],
+            [],
+        ]
+
+        def invalid_objects(cur, owner):
+            return invalid_after_attempt.pop(0)
+
+        config = AppConfig(
+            oracle=OracleConfig(schema="APP"),
+            postgres=PostgresConfig(schema="public"),
+            dependency=DependencyConfig(max_attempts=2),
+        )
+        dependency_rows = [
+            {"source_db": "postgres", "object_schema": "public", "object_name": "mv_sales", "object_type": "MATERIALIZED VIEW"},
+            {"source_db": "postgres", "object_schema": "public", "object_name": "mv_sales", "object_type": "MATERIALIZED VIEW"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("oracle_pg_sync.db.oracle.connect", return_value=Conn()),
+                patch("oracle_pg_sync.db.postgres.connect", return_value=Conn()),
+                patch("oracle_pg_sync.db.oracle.invalid_object_rows", side_effect=invalid_objects),
+                patch(
+                    "oracle_pg_sync.db.postgres.refresh_materialized_views",
+                    side_effect=lambda cur, rows: calls.append(("refresh", len(rows))) or [],
+                ),
+                patch(
+                    "oracle_pg_sync.db.oracle.compile_invalid_objects",
+                    side_effect=lambda cur, owner: calls.append("compile") or [],
+                ),
+                patch(
+                    "oracle_pg_sync.db.postgres.validate_dependent_objects",
+                    side_effect=lambda cur, rows: calls.append(("validate", len(rows))) or [],
+                ),
+            ):
+                _run_dependency_maintenance(
+                    config,
+                    ["public.sample"],
+                    __import__("logging").getLogger("test_dependency_optimized"),
+                    Path(tmp),
+                    dependency_rows,
+                    execute=True,
+                )
+
+        self.assertEqual(calls, [("refresh", 1), "compile", "commit", "compile", "commit", ("validate", 1)])
+
+    def test_unique_dependency_objects_deduplicates_by_object_identity(self):
+        rows = _unique_dependency_objects(
+            [
+                {"source_db": "postgres", "object_schema": "public", "object_name": "mv_sales", "object_type": "MATERIALIZED VIEW"},
+                {"source_db": "postgres", "object_schema": "public", "object_name": "mv_sales", "object_type": "MATERIALIZED VIEW"},
+                {"source_db": "oracle", "object_schema": "APP", "object_name": "V_SALES", "object_type": "VIEW"},
+            ]
+        )
+
+        self.assertEqual(len(rows), 2)
 
     def test_dependency_summary_marks_broken_rows(self):
         rows = summarize_dependency_rows(

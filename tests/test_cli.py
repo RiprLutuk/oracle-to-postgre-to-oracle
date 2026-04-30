@@ -3,20 +3,35 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 from oracle_pg_sync.cli import (
+    _audit_workers,
     _apply_lob_override,
     _apply_profile,
     _apply_runtime_table_overrides,
     _apply_where_override,
+    _compare_sorted_key_streams,
+    _copy_log_to_run_dir,
+    _enforce_level1_sync_guards,
     _latest_run_dir,
     _resolve_tables,
     _run_report_files,
     build_parser,
     main as cli_main,
+    run_audit,
 )
-from oracle_pg_sync.config import AppConfig, OracleConfig, PostgresConfig, TableConfig
+from oracle_pg_sync.config import (
+    AppConfig,
+    OracleConfig,
+    PostgresConfig,
+    RowcountValidationConfig,
+    SyncConfig,
+    TableConfig,
+    ValidationConfig,
+)
 from oracle_pg_sync.ops import _expand_bare_lob_flag, _extract_leading_global_args, main as ops_main
+from oracle_pg_sync.utils.logging import attach_run_log, detach_log_handler, setup_logging
 
 
 class CliTest(unittest.TestCase):
@@ -119,6 +134,85 @@ tables:
         self.assertEqual(args.max_db_connections, 6)
         self.assertTrue(args.respect_dependencies)
 
+    def test_audit_workers_defaults_to_sync_workers(self):
+        args = build_parser().parse_args(["audit"])
+        config = AppConfig(
+            oracle=OracleConfig(schema="APP"),
+            postgres=PostgresConfig(schema="public"),
+            sync=SyncConfig(workers=4),
+        )
+
+        self.assertEqual(_audit_workers(args, config), 4)
+
+    def test_parallel_audit_uses_execution_context_pool(self):
+        calls = []
+
+        class DummyCursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        class DummyConnection:
+            def cursor(self):
+                return DummyCursor()
+
+        class DummyContext:
+            workers = 2
+            max_db_connections = 2
+            parallel_tables = False
+            parallel_chunks = False
+
+            def oracle_connection(self):
+                class _Handle:
+                    def __enter__(self_inner):
+                        calls.append("oracle")
+                        return DummyConnection()
+
+                    def __exit__(self_inner, *args):
+                        return False
+
+                return _Handle()
+
+            def postgres_connection(self):
+                class _Handle:
+                    def __enter__(self_inner):
+                        calls.append("postgres")
+                        return DummyConnection()
+
+                    def __exit__(self_inner, *args):
+                        return False
+
+                return _Handle()
+
+            def table_logger(self, logger, table_name):
+                return logger
+
+            def close(self):
+                calls.append("close")
+
+        config = AppConfig(
+            oracle=OracleConfig(schema="APP"),
+            postgres=PostgresConfig(schema="public"),
+            sync=SyncConfig(workers=1),
+        )
+
+        with (
+            patch("oracle_pg_sync.sync.runtime.create_sync_execution_context", return_value=DummyContext()),
+            patch(
+                "oracle_pg_sync.cli._audit_table",
+                side_effect=lambda config, table, *args: ({"table_name": table, "status": "MATCH"}, [], [], []),
+            ),
+        ):
+            result = run_audit(config, ["public.a", "public.b"], __import__("logging").getLogger("test_parallel_audit"), workers=2)
+
+        self.assertEqual(len(result.inventory_rows), 2)
+        self.assertEqual(calls.count("oracle"), 2)
+        self.assertEqual(calls.count("postgres"), 2)
+        self.assertIn("close", calls)
+        self.assertEqual(config.sync.workers, 1)
+
     def test_sync_accepts_where_override(self):
         args = build_parser().parse_args(
             [
@@ -187,12 +281,104 @@ tables:
         self.assertTrue(args.no_rowcount_validation)
         self.assertTrue(args.rowcount_only)
 
+    def test_execute_rejects_disabled_rowcount_validation_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text(
+                """
+oracle:
+  schema: APP
+postgres:
+  schema: public
+reports:
+  output_dir: reports
+tables:
+  - name: public.sample
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(SystemExit, "no-rowcount-validation"):
+                cli_main(["sync", "--go", "--no-rowcount-validation", "--config", str(config_path)])
+
+    def test_execute_rejects_skip_failed_rows(self):
+        args = build_parser().parse_args(["sync", "--go"])
+        config = AppConfig(
+            oracle=OracleConfig(schema="APP"),
+            postgres=PostgresConfig(schema="public"),
+            sync=SyncConfig(skip_failed_rows=True),
+            tables=[TableConfig(name="public.sample")],
+        )
+
+        with self.assertRaisesRegex(SystemExit, "skip_failed_rows"):
+            _enforce_level1_sync_guards(args, config, ["public.sample"])
+
+    def test_execute_rejects_table_rowcount_warning_only(self):
+        args = build_parser().parse_args(["sync", "--go"])
+        config = AppConfig(
+            oracle=OracleConfig(schema="APP"),
+            postgres=PostgresConfig(schema="public"),
+            tables=[
+                TableConfig(
+                    name="public.sample",
+                    validation=ValidationConfig(rowcount=RowcountValidationConfig(fail_on_mismatch=False)),
+                )
+            ],
+        )
+
+        with self.assertRaisesRegex(SystemExit, "fail_on_mismatch=false"):
+            _enforce_level1_sync_guards(args, config, ["public.sample"])
+
     def test_validate_accepts_missing_keys(self):
         args = build_parser().parse_args(["validate", "missing-keys", "--tables", "A_HP_BATCH"])
 
         self.assertEqual(args.command, "validate")
         self.assertEqual(args.validate_action, "missing-keys")
         self.assertEqual(args.tables, ["A_HP_BATCH"])
+
+    def test_missing_key_compare_streams_beyond_sample_limit(self):
+        class Cursor:
+            def __init__(self, rows):
+                self.rows = list(rows)
+
+            def fetchmany(self, size):
+                batch = self.rows[:size]
+                self.rows = self.rows[size:]
+                return batch
+
+        result = _compare_sorted_key_streams(
+            Cursor([(1,), (2,), (3,), (4,), (5,)]),
+            Cursor([(1,), (2,), (3,), (4,), (6,)]),
+            sample_limit=1,
+            batch_size=2,
+        )
+
+        self.assertEqual(result.oracle_not_postgres_count, 1)
+        self.assertEqual(result.postgres_not_oracle_count, 1)
+        self.assertEqual(result.oracle_not_postgres_sample, [("5",)])
+        self.assertEqual(result.postgres_not_oracle_sample, [("6",)])
+        self.assertFalse(result.sample_truncated)
+
+    def test_missing_key_compare_reports_truncated_samples(self):
+        class Cursor:
+            def __init__(self, rows):
+                self.rows = list(rows)
+
+            def fetchmany(self, size):
+                batch = self.rows[:size]
+                self.rows = self.rows[size:]
+                return batch
+
+        result = _compare_sorted_key_streams(
+            Cursor([(1,), (2,), (3,)]),
+            Cursor([]),
+            sample_limit=2,
+            batch_size=1,
+        )
+
+        self.assertEqual(result.oracle_not_postgres_count, 3)
+        self.assertEqual(result.oracle_not_postgres_sample, [("1",), ("2",)])
+        self.assertTrue(result.sample_truncated)
 
     def test_sync_accepts_safe_modes_and_simulate(self):
         args = build_parser().parse_args(["sync", "--mode", "truncate_safe", "--simulate"])
@@ -302,6 +488,43 @@ reports:
 
         self.assertEqual(latest, new_run)
         self.assertEqual(files, [str(new_run / "report.html"), str(new_run / "report.xlsx")])
+
+    def test_copy_log_does_not_overwrite_existing_run_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp) / "reports"
+            run_dir = report_dir / "run_20260102_010101_new"
+            run_dir.mkdir(parents=True)
+            report_dir.joinpath("sync.log").write_text("global log\n", encoding="utf-8")
+            run_dir.joinpath("logs.txt").write_text("run only\n", encoding="utf-8")
+
+            _copy_log_to_run_dir(report_dir, run_dir)
+
+            self.assertEqual((run_dir / "logs.txt").read_text(encoding="utf-8"), "run only\n")
+
+    def test_run_log_handler_writes_only_while_attached(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report_dir = Path(tmp) / "reports"
+            run_dir = report_dir / "run_20260102_010101_new"
+            logger = setup_logging(report_dir)
+            handler = attach_run_log(logger, run_dir)
+            try:
+                logger.info("inside run")
+                detach_log_handler(logger, handler)
+                handler = None
+                logger.info("outside run")
+            finally:
+                detach_log_handler(logger, handler)
+                for open_handler in list(logger.handlers):
+                    logger.removeHandler(open_handler)
+                    open_handler.close()
+
+            run_log = (run_dir / "logs.txt").read_text(encoding="utf-8")
+            global_log = (report_dir / "sync.log").read_text(encoding="utf-8")
+
+        self.assertIn("inside run", run_log)
+        self.assertNotIn("outside run", run_log)
+        self.assertIn("inside run", global_log)
+        self.assertIn("outside run", global_log)
 
     def test_report_command_regenerates_latest_run_html(self):
         with tempfile.TemporaryDirectory() as tmp:

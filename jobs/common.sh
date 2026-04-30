@@ -12,6 +12,29 @@ TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-3600}"
 LOG_ROTATE_BYTES="${LOG_ROTATE_BYTES:-10485760}"
 LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-14}"
 
+require_positive_int() {
+  local name="$1"
+  local value="$2"
+  if ! [[ "$value" =~ ^[1-9][0-9]*$ ]]; then
+    echo "$name must be a positive integer, got: $value" >&2
+    exit 2
+  fi
+}
+
+require_non_negative_int() {
+  local name="$1"
+  local value="$2"
+  if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+    echo "$name must be a non-negative integer, got: $value" >&2
+    exit 2
+  fi
+}
+
+require_positive_int RETRY "$RETRY"
+require_positive_int TIMEOUT_SECONDS "$TIMEOUT_SECONDS"
+require_positive_int LOG_ROTATE_BYTES "$LOG_ROTATE_BYTES"
+require_non_negative_int LOG_RETENTION_DAYS "$LOG_RETENTION_DAYS"
+
 if [[ ! -x "$PYTHON_BIN" ]]; then
   PYTHON_BIN="python"
 fi
@@ -103,4 +126,3 @@ run_sync_job() {
   fi
   return "$status"
 }
-

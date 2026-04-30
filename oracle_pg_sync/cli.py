@@ -11,6 +11,8 @@ import shutil
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +22,7 @@ from oracle_pg_sync.config import AppConfig, TableConfig, load_config, load_envi
 from oracle_pg_sync.dependency_health import critical_dependency_rows, summarize_dependency_rows
 from oracle_pg_sync.manifest import RunManifest
 from oracle_pg_sync.manifest import sanitize
-from oracle_pg_sync.utils.logging import setup_logging
+from oracle_pg_sync.utils.logging import attach_run_log, setup_logging
 from oracle_pg_sync.utils.naming import split_schema_table
 
 
@@ -201,6 +203,8 @@ def main(argv: list[str] | None = None) -> int:
     checkpoint_store = CheckpointStore(config.sync.checkpoint_dir)
 
     if getattr(args, "no_rowcount_validation", False):
+        if args.command in {"sync", "all"} and getattr(args, "execute", False):
+            raise SystemExit("--no-rowcount-validation is not allowed with --go/--execute")
         config.validation.rowcount.enabled = False
 
     if args.command in {"sync", "all"}:
@@ -246,6 +250,7 @@ def main(argv: list[str] | None = None) -> int:
     job_key = _job_key(config, args, direction, tables) if args.command in {"sync", "all"} else ""
 
     if args.command in {"sync", "all"}:
+        _enforce_level1_sync_guards(args, config, tables)
         blocked = checkpoint_store.job_blocked(job_key, max_failures=config.sync.max_failures)
         if blocked:
             payload = _alert_payload(
@@ -276,8 +281,10 @@ def main(argv: list[str] | None = None) -> int:
             tables_requested=tables,
             checkpoint_path=str(checkpoint_store.path),
         )
-        audit_result = run_audit(config, tables, logger, workers=getattr(args, "workers", 1))
         run_dir = manifest.run_dir
+        attach_run_log(logger, run_dir)
+        logger.info("Run log dibuat: %s", run_dir / "logs.txt")
+        audit_result = run_audit(config, tables, logger, workers=_audit_workers(args, config))
         write_audit_reports(
             run_dir,
             inventory_rows=audit_result.inventory_rows,
@@ -334,6 +341,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         run_dir = manifest.run_dir
         run_dir.mkdir(parents=True, exist_ok=True)
+        attach_run_log(logger, run_dir)
+        logger.info("Run log dibuat: %s", run_dir / "logs.txt")
         if args.validate_action == "missing-keys" or args.missing_keys:
             rows = validate_missing_keys(config, tables, logger, direction=direction or "oracle-to-postgres", report_dir=run_dir)
             write_csv(run_dir / "missing_keys_summary.csv", rows)
@@ -380,6 +389,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         run_dir = manifest.run_dir
         run_dir.mkdir(parents=True, exist_ok=True)
+        attach_run_log(logger, run_dir)
+        logger.info("Run log dibuat: %s", run_dir / "logs.txt")
         if getattr(args, "rowcount_only", False):
             rows = validate_rowcounts(config, tables, logger, direction=direction or "oracle-to-postgres")
             write_csv(run_dir / "rowcount_validation.csv", rows)
@@ -543,6 +554,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         run_dir = manifest.run_dir
         run_dir.mkdir(parents=True, exist_ok=True)
+        attach_run_log(logger, run_dir)
+        logger.info("Run log dibuat: %s", run_dir / "logs.txt")
         result = run_object_audit(
             config,
             logger,
@@ -584,6 +597,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         run_dir = manifest.run_dir
         run_dir.mkdir(parents=True, exist_ok=True)
+        attach_run_log(logger, run_dir)
+        logger.info("Run log dibuat: %s", run_dir / "logs.txt")
         rows = run_table_dependency_audit(config, tables, logger)
         out_path = Path(args.out) if args.out else run_dir / "table_object_dependencies.csv"
         write_csv(out_path, rows)
@@ -636,8 +651,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         run_dir = manifest.run_dir
         run_dir.mkdir(parents=True, exist_ok=True)
+        attach_run_log(logger, run_dir)
+        logger.info("Run log dibuat: %s", run_dir / "logs.txt")
         logger.info("Step 1/3 audit awal")
-        pre_audit_result = run_audit(config, tables, logger, workers=getattr(args, "workers", 1))
+        pre_audit_result = run_audit(config, tables, logger, workers=_audit_workers(args, config))
         write_csv(run_dir / "pre_inventory_summary.csv", pre_audit_result.inventory_rows)
         write_csv(run_dir / "pre_column_diff.csv", pre_audit_result.column_diff_rows)
         write_csv(run_dir / "pre_type_mismatch.csv", pre_audit_result.type_mismatch_rows)
@@ -702,7 +719,7 @@ def main(argv: list[str] | None = None) -> int:
         metrics_rows = _metrics_rows(sync_results, rollback_rows)
         _write_metrics_json(run_dir, metrics_rows)
         logger.info("Step 3/3 audit ulang dan report")
-        audit_result = run_audit(config, tables, logger, workers=getattr(args, "workers", 1))
+        audit_result = run_audit(config, tables, logger, workers=_audit_workers(args, config))
         write_audit_reports(
             run_dir,
             inventory_rows=audit_result.inventory_rows,
@@ -775,6 +792,7 @@ def main(argv: list[str] | None = None) -> int:
 def run_audit(config: AppConfig, tables: list[str], logger: logging.Logger, *, workers: int = 1):
     from oracle_pg_sync.db import oracle, postgres
     from oracle_pg_sync.metadata.compare import AuditResult
+    from oracle_pg_sync.sync.runtime import create_sync_execution_context
 
     inventory_rows: list[dict] = []
     column_diff_rows: list[dict] = []
@@ -784,30 +802,44 @@ def run_audit(config: AppConfig, tables: list[str], logger: logging.Logger, *, w
     worker_count = max(1, int(workers or 1))
     if worker_count > 1:
         logger.info("Audit parallel workers=%s", worker_count)
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = {
-                executor.submit(_audit_table_with_new_connections, config, table_name, logger): table_name
-                for table_name in tables
-            }
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    table = split_schema_table(futures[future], config.postgres.schema)
-                    logger.exception("Audit failed for %s", table.fqname)
-                    result = (
-                        {
-                            "table_name": table.fqname,
-                            "oracle_exists": "",
-                            "postgres_exists": "",
-                            "status": "MISMATCH",
-                            "error": str(exc),
-                        },
-                        [],
-                        [],
-                        [],
-                    )
-                _merge_audit_result(result, inventory_rows, column_diff_rows, type_mismatch_rows, dependency_rows)
+        old_workers = config.sync.workers
+        old_parallel_workers = config.sync.parallel_workers
+        old_max_connections = config.sync.max_db_connections
+        config.sync.workers = worker_count
+        config.sync.parallel_workers = worker_count
+        if not config.sync.max_db_connections:
+            config.sync.max_db_connections = worker_count
+        execution_context = create_sync_execution_context(config, logger)
+        try:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                futures = {
+                    executor.submit(_audit_table_with_execution_context, config, table_name, logger, execution_context): table_name
+                    for table_name in tables
+                }
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        table = split_schema_table(futures[future], config.postgres.schema)
+                        logger.exception("Audit failed for %s", table.fqname)
+                        result = (
+                            {
+                                "table_name": table.fqname,
+                                "oracle_exists": "",
+                                "postgres_exists": "",
+                                "status": "MISMATCH",
+                                "error": str(exc),
+                            },
+                            [],
+                            [],
+                            [],
+                        )
+                    _merge_audit_result(result, inventory_rows, column_diff_rows, type_mismatch_rows, dependency_rows)
+        finally:
+            execution_context.close()
+            config.sync.workers = old_workers
+            config.sync.parallel_workers = old_parallel_workers
+            config.sync.max_db_connections = old_max_connections
     else:
         with oracle.connect(config.oracle) as ocon, postgres.connect(config.postgres, autocommit=True) as pcon:
             with ocon.cursor() as ocur, pcon.cursor() as pcur:
@@ -898,22 +930,30 @@ def validate_missing_keys(
                     source_table,
                     [(key.lower(), key.upper()) for key in keys],
                     where=table_cfg.where,
+                    order_by=[key.upper() for key in keys],
                 )
-                postgres_cursor = postgres.select_rows(pcur, target_schema, target_table, [key.lower() for key in keys])
-                source_keys = {_key_tuple(row) for row in oracle_cursor.fetchmany(sample_limit + 1)}
-                target_keys = {_key_tuple(row) for row in postgres_cursor.fetchmany(sample_limit + 1)}
-                in_oracle_not_pg = sorted(source_keys - target_keys)[:sample_limit]
-                in_pg_not_oracle = sorted(target_keys - source_keys)[:sample_limit]
-                for key in in_oracle_not_pg:
+                postgres_cursor = postgres.select_rows(
+                    pcur,
+                    target_schema,
+                    target_table,
+                    [key.lower() for key in keys],
+                    order_by=[key.lower() for key in keys],
+                )
+                key_diff = _compare_sorted_key_streams(oracle_cursor, postgres_cursor, sample_limit=sample_limit)
+                for key in key_diff.oracle_not_postgres_sample:
                     oracle_missing_rows.append(_missing_key_row(target_schema, target_table, keys, key))
-                for key in in_pg_not_oracle:
+                for key in key_diff.postgres_not_oracle_sample:
                     postgres_missing_rows.append(_missing_key_row(target_schema, target_table, keys, key))
-                status = "MATCH" if not in_oracle_not_pg and not in_pg_not_oracle else "MISMATCH"
+                status = (
+                    "MATCH"
+                    if key_diff.oracle_not_postgres_count == 0 and key_diff.postgres_not_oracle_count == 0
+                    else "MISMATCH"
+                )
                 logger.info(
                     "Missing keys %s -> oracle_not_pg=%s pg_not_oracle=%s",
                     table_name,
-                    len(in_oracle_not_pg),
-                    len(in_pg_not_oracle),
+                    key_diff.oracle_not_postgres_count,
+                    key_diff.postgres_not_oracle_count,
                 )
                 summary.append(
                     {
@@ -921,8 +961,12 @@ def validate_missing_keys(
                         "direction": direction,
                         "key_columns": ";".join(keys),
                         "sample_limit": sample_limit,
-                        "oracle_not_postgres_sample": len(in_oracle_not_pg),
-                        "postgres_not_oracle_sample": len(in_pg_not_oracle),
+                        "oracle_not_postgres_count": key_diff.oracle_not_postgres_count,
+                        "postgres_not_oracle_count": key_diff.postgres_not_oracle_count,
+                        "oracle_not_postgres_sample": len(key_diff.oracle_not_postgres_sample),
+                        "postgres_not_oracle_sample": len(key_diff.postgres_not_oracle_sample),
+                        "sample_truncated": key_diff.sample_truncated,
+                        "comparison_mode": "full_sorted_stream",
                         "status": status,
                         "missing_key_report_files": "keys_in_oracle_not_in_postgres.csv;keys_in_postgres_not_in_oracle.csv",
                     }
@@ -932,8 +976,73 @@ def validate_missing_keys(
     return summary
 
 
+class _KeyDiff:
+    def __init__(self) -> None:
+        self.oracle_not_postgres_count = 0
+        self.postgres_not_oracle_count = 0
+        self.oracle_not_postgres_sample: list[tuple[Any, ...]] = []
+        self.postgres_not_oracle_sample: list[tuple[Any, ...]] = []
+
+    @property
+    def sample_truncated(self) -> bool:
+        return (
+            self.oracle_not_postgres_count > len(self.oracle_not_postgres_sample)
+            or self.postgres_not_oracle_count > len(self.postgres_not_oracle_sample)
+        )
+
+
+def _compare_sorted_key_streams(source_cursor: Any, target_cursor: Any, *, sample_limit: int, batch_size: int = 5000) -> _KeyDiff:
+    result = _KeyDiff()
+    source_iter = _iter_key_cursor(source_cursor, batch_size=batch_size)
+    target_iter = _iter_key_cursor(target_cursor, batch_size=batch_size)
+    source_key = next(source_iter, None)
+    target_key = next(target_iter, None)
+    while source_key is not None or target_key is not None:
+        if source_key == target_key:
+            source_key = next(source_iter, None)
+            target_key = next(target_iter, None)
+        elif target_key is None or (source_key is not None and source_key < target_key):
+            result.oracle_not_postgres_count += 1
+            if len(result.oracle_not_postgres_sample) < sample_limit:
+                result.oracle_not_postgres_sample.append(source_key)
+            source_key = next(source_iter, None)
+        else:
+            result.postgres_not_oracle_count += 1
+            if len(result.postgres_not_oracle_sample) < sample_limit:
+                result.postgres_not_oracle_sample.append(target_key)
+            target_key = next(target_iter, None)
+    return result
+
+
+def _iter_key_cursor(cursor: Any, *, batch_size: int):
+    while True:
+        rows = cursor.fetchmany(max(1, int(batch_size or 5000)))
+        if not rows:
+            break
+        for row in rows:
+            yield _key_tuple(row)
+
+
 def _key_tuple(row: Any) -> tuple[Any, ...]:
-    return tuple(row)
+    return tuple(_normalize_key_value(value) for value in row)
+
+
+def _normalize_key_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, memoryview):
+        value = value.tobytes()
+    if isinstance(value, bytes):
+        return value.hex()
+    if isinstance(value, Decimal):
+        return format(value.normalize(), "f")
+    if isinstance(value, datetime):
+        if value.tzinfo:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.isoformat(timespec="microseconds")
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
 
 
 def _missing_key_row(schema: str, table: str, keys: list[str], values: tuple[Any, ...]) -> dict[str, Any]:
@@ -1000,6 +1109,18 @@ def _audit_table_with_new_connections(
             return _audit_table(config, table_name, ocur, pcur, logger)
 
 
+def _audit_table_with_execution_context(
+    config: AppConfig,
+    table_name: str,
+    logger: logging.Logger,
+    execution_context,
+) -> tuple[dict, list[dict], list[dict], list[dict]]:
+    with execution_context.oracle_connection() as ocon, execution_context.postgres_connection() as pcon:
+        with ocon.cursor() as ocur, pcon.cursor() as pcur:
+            table_logger = execution_context.table_logger(logger, table_name)
+            return _audit_table(config, table_name, ocur, pcur, table_logger)
+
+
 def _audit_table(config: AppConfig, table_name: str, ocur, pcur, logger: logging.Logger) -> tuple[dict, list[dict], list[dict], list[dict]]:
     from oracle_pg_sync.db import oracle, postgres
     from oracle_pg_sync.metadata.compare import compare_table_metadata
@@ -1014,15 +1135,25 @@ def _audit_table(config: AppConfig, table_name: str, ocur, pcur, logger: logging
     source_table = table_cfg.source_table or target_table
     effective_where = table_cfg.where
     table = split_schema_table(f"{target_schema}.{target_table}", config.postgres.schema)
-    logger.info(
-        "Audit resolved %s -> %s.%s to %s.%s where=%s",
-        table_name,
-        source_schema,
-        source_table,
-        target_schema,
-        target_table,
-        effective_where or "",
-    )
+    if effective_where:
+        logger.info(
+            "Audit resolved %s -> %s.%s to %s.%s where=%s",
+            table_name,
+            source_schema,
+            source_table,
+            target_schema,
+            target_table,
+            effective_where,
+        )
+    else:
+        logger.info(
+            "Audit resolved %s -> %s.%s to %s.%s",
+            table_name,
+            source_schema,
+            source_table,
+            target_schema,
+            target_table,
+        )
     try:
         oracle_meta = fetch_oracle_metadata(
             ocur,
@@ -1154,6 +1285,42 @@ def _apply_sync_runtime_overrides(args: argparse.Namespace, config: AppConfig) -
         config.sync.max_db_connections = max(1, int(args.max_db_connections))
     if hasattr(args, "respect_dependencies"):
         config.sync.respect_dependencies = bool(args.respect_dependencies)
+
+
+def _audit_workers(args: argparse.Namespace, config: AppConfig) -> int:
+    return max(1, int(getattr(args, "workers", config.sync.workers) or 1))
+
+
+def _enforce_level1_sync_guards(args: argparse.Namespace, config: AppConfig, tables: list[str]) -> None:
+    if not getattr(args, "execute", False):
+        return
+    if config.sync.skip_failed_rows:
+        raise SystemExit("sync.skip_failed_rows=true is not allowed with --go/--execute")
+    if not config.validation.rowcount.enabled:
+        raise SystemExit("validation.rowcount.enabled=false is not allowed with --go/--execute")
+    if not config.validation.rowcount.fail_on_mismatch:
+        raise SystemExit("validation.rowcount.fail_on_mismatch=false is not allowed with --go/--execute")
+
+    disabled: list[str] = []
+    warning_only: list[str] = []
+    for table_name in tables:
+        table_cfg = config.resolve_table_config(table_name, strict=False)
+        if table_cfg is None:
+            continue
+        if not table_cfg.validation.rowcount.enabled:
+            disabled.append(table_name)
+        if not table_cfg.validation.rowcount.fail_on_mismatch:
+            warning_only.append(table_name)
+    if disabled:
+        raise SystemExit(
+            "table validation.rowcount.enabled=false is not allowed with --go/--execute: "
+            + ", ".join(disabled)
+        )
+    if warning_only:
+        raise SystemExit(
+            "table validation.rowcount.fail_on_mismatch=false is not allowed with --go/--execute: "
+            + ", ".join(warning_only)
+        )
 
 
 def _single_table_config(config: AppConfig, tables: list[str], flag_name: str) -> TableConfig:
@@ -1367,6 +1534,7 @@ def _run_dependency_maintenance(
         write_csv(report_dir / "dependency_maintenance.csv", [])
         return []
     rows: list[dict] = []
+    maintenance_dependencies = _unique_dependency_objects(dependency_rows)
     try:
         with oracle.connect(config.oracle) as ocon, postgres.connect(config.postgres, autocommit=True) as pcon:
             with ocon.cursor() as ocur, pcon.cursor() as pcur:
@@ -1375,9 +1543,9 @@ def _run_dependency_maintenance(
                     int(getattr(config.dependency, "max_attempts", 0) or config.dependency.max_recompile_attempts or 1),
                 )
                 remaining_invalid = oracle.invalid_object_rows(ocur, config.oracle.schema) if hasattr(ocur, "execute") else [{}]
+                if config.dependency.refresh_postgres_mview:
+                    rows.extend({**row, "attempt": 1} for row in postgres.refresh_materialized_views(pcur, maintenance_dependencies))
                 for attempt in range(1, attempts + 1):
-                    if config.dependency.refresh_postgres_mview:
-                        rows.extend({**row, "attempt": attempt} for row in postgres.refresh_materialized_views(pcur, dependency_rows))
                     attempt_rows = []
                     if config.dependency.auto_recompile_oracle:
                         attempt_rows = oracle.compile_invalid_objects(ocur, config.oracle.schema)
@@ -1411,7 +1579,7 @@ def _run_dependency_maintenance(
                         }
                         for row in remaining_invalid
                     )
-                rows.extend(postgres.validate_dependent_objects(pcur, dependency_rows))
+                rows.extend(postgres.validate_dependent_objects(pcur, maintenance_dependencies))
     except Exception as exc:
         logger.exception("Dependency maintenance failed")
         rows.append({
@@ -1425,6 +1593,23 @@ def _run_dependency_maintenance(
     write_csv(report_dir / "dependency_maintenance.csv", rows)
     logger.info("Dependency maintenance selesai rows=%s tables=%s", len(rows), len(tables))
     return rows
+
+
+def _unique_dependency_objects(rows: list[dict]) -> list[dict]:
+    unique: list[dict] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for row in rows:
+        key = (
+            str(row.get("source_db") or "").lower(),
+            str(row.get("object_schema") or "").lower(),
+            str(row.get("object_type") or "").upper(),
+            str(row.get("object_name") or "").lower(),
+        )
+        if not key[1] or not key[2] or not key[3] or key in seen:
+            continue
+        seen.add(key)
+        unique.append(row)
+    return unique
 
 
 def _checksum_rows_from_results(results: list, fallback_rows: list[dict]) -> list[dict]:
@@ -1748,11 +1933,14 @@ def _write_audit_run_reports(
 
 
 def _copy_log_to_run_dir(report_dir: Path, run_dir: Path) -> None:
+    run_log_path = run_dir / "logs.txt"
+    if run_log_path.exists():
+        return
     log_path = report_dir / "sync.log"
     if log_path.exists():
-        shutil.copyfile(log_path, run_dir / "logs.txt")
+        shutil.copyfile(log_path, run_log_path)
     else:
-        (run_dir / "logs.txt").write_text("", encoding="utf-8")
+        run_log_path.write_text("", encoding="utf-8")
 
 
 def _run_report_files(run_dir: Path, *names: str) -> list[str]:

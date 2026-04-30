@@ -1,6 +1,10 @@
 # Run from the repository checkout. Logs are written to reports/job_logs/.
 SHELL=/bin/bash
 CONFIG_PATH=/home/app/oracle-pg-sync-audit/config.yaml
+RETRY=3
+TIMEOUT_SECONDS=3600
+LOG_ROTATE_BYTES=10485760
+LOG_RETENTION_DAYS=14
 # Optional alert command. It receives ALERT_MESSAGE in the environment.
 # ALERT_COMMAND='printf "%s\n" "$ALERT_MESSAGE" | mail -s "oracle-pg-sync failed" dba@example.com'
 

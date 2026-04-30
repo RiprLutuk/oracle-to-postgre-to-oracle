@@ -1,5 +1,8 @@
 # User Guide
 
+Untuk panduan Bahasa Indonesia yang lebih ringkas untuk operator, mulai dari
+[Panduan Operator Awam](OPERATOR_QUICK_START_ID.md).
+
 `oracle-pg-sync-audit` is a DBA-facing sync and audit tool for Oracle and PostgreSQL. It supports:
 
 - Oracle -> PostgreSQL sync
@@ -147,6 +150,10 @@ oracle-pg-sync-audit audit --config config.yaml --all-postgres-tables --fast-cou
 oracle-pg-sync-audit audit --config config.yaml --workers 4 --suggest-drop
 oracle-pg-sync-audit audit-objects --config config.yaml
 ```
+
+When no table-level `where` filter is configured, audit logs omit the `where`
+suffix. If `where=...` appears, the table is being audited with that effective
+filter.
 
 ## Sync Oracle -> PostgreSQL
 
@@ -457,6 +464,10 @@ Missing-key validation requires `key_columns` or `primary_key` in the table conf
 
 - `keys_in_oracle_not_in_postgres.csv`
 - `keys_in_postgres_not_in_oracle.csv`
+
+Missing-key validation uses full sorted streaming comparison. The final status
+is based on the complete key stream; `sample_limit` only limits how many detail
+rows are written to the CSV files.
 
 ## Cron Jobs
 

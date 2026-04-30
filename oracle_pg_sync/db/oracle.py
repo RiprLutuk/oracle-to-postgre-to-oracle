@@ -697,7 +697,14 @@ def _compile_statement(owner: str, object_type: str, object_name: str) -> str:
     raise ValueError(f"Unsupported Oracle compile object type: {object_type}")
 
 
-def select_rows(cur, owner: str, table: str, columns: list[tuple[str, str | None]], where: str | None = None):
+def select_rows(
+    cur,
+    owner: str,
+    table: str,
+    columns: list[tuple[str, str | None]],
+    where: str | None = None,
+    order_by: list[str] | None = None,
+):
     select_items = []
     for pg_column, oracle_column in columns:
         if oracle_column is None:
@@ -708,6 +715,8 @@ def select_rows(cur, owner: str, table: str, columns: list[tuple[str, str | None
     query = f"SELECT {select_list} FROM {qident(owner.upper())}.{qident(_sql_table_name(cur, owner, table))}"
     if where:
         query += f" WHERE {where}"
+    if order_by:
+        query += " ORDER BY " + ", ".join(qident(column.upper()) for column in order_by)
     cur.execute(query)
     return cur
 

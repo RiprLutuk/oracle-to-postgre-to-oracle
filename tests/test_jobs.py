@@ -10,6 +10,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class JobScriptsTest(unittest.TestCase):
+    def test_cron_entrypoint_scripts_are_executable(self):
+        for script in ("daily.sh", "incremental.sh", "every_5min.sh"):
+            mode = (ROOT / "jobs" / script).stat().st_mode
+            self.assertTrue(mode & stat.S_IXUSR, script)
+
     def test_daily_job_supports_oracle_to_pg_direction(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -85,6 +90,26 @@ class JobScriptsTest(unittest.TestCase):
             args = capture.read_text(encoding="utf-8")
             self.assertIn("--profile every_5min", args)
             self.assertIn("--direction oracle-to-postgres", args)
+
+    def test_job_rejects_invalid_retry_value(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            capture = tmp_path / "invalid_retry_args.txt"
+            fake_python = _fake_python(tmp_path, capture)
+            env = _job_env(tmp_path, fake_python)
+            env["RETRY"] = "abc"
+
+            result = subprocess.run(
+                ["bash", str(ROOT / "jobs/daily.sh"), "oracle_to_pg"],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("RETRY must be a positive integer", result.stderr)
 
 
 def _fake_python(tmp_path: Path, capture: Path) -> Path:

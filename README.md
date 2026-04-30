@@ -11,6 +11,7 @@ modular.
 
 ## Guide Lengkap
 
+- [Panduan Operator Awam](docs/OPERATOR_QUICK_START_ID.md): urutan command harian paling aman, cara baca hasil, dan apa yang harus dicek sebelum `--go`.
 - [Quick Start](docs/USER_GUIDE.md): setup awal, install, isi `.env`, isi `config.yaml`, dan command harian.
 - [Configuration Reference](docs/CONFIG_REFERENCE.md): penjelasan semua field `.env` dan `config.yaml`.
 - [Production Runbook](docs/PRODUCTION_RUNBOOK.md): alur audit, dry-run, eksekusi, validasi, rollback, dan checklist produksi.
@@ -194,6 +195,18 @@ ops status
 ops report latest
 ```
 
+Untuk operator yang tidak perlu detail teknis, mulai dari:
+
+```bash
+ops doctor --config config.yaml
+ops audit --config config.yaml --tables public.nama_table --exact-count
+ops sync --config config.yaml --direction oracle-to-postgres --tables public.nama_table --mode truncate_safe
+ops sync --config config.yaml --direction oracle-to-postgres --tables public.nama_table --mode truncate_safe --go
+ops report latest --config config.yaml
+```
+
+Panduan langkah demi langkah ada di [Panduan Operator Awam](docs/OPERATOR_QUICK_START_ID.md).
+
 Audit, sync, audit ulang, report:
 
 ```bash
@@ -226,6 +239,8 @@ reports/
 ```
 
 File yang tidak relevan untuk command tertentu tidak dibuat. Root `reports/` dipakai untuk checkpoint, lock, dan log runtime global saja.
+Untuk investigasi satu run, pakai `reports/run_<timestamp>_<run_id>/logs.txt`.
+Jangan pakai `reports/sync.log` untuk menyimpulkan satu run karena file itu log global lintas run.
 
 Central Excel `report.xlsx` berisi sheet:
 

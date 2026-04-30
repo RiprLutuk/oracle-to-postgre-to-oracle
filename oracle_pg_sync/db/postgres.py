@@ -740,6 +740,7 @@ def refresh_materialized_views(cur, dependency_rows: list[dict[str, Any]], *, co
 
 
 def validate_dependent_objects(cur, dependency_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[str, str, str]] = set()
     rows: list[dict[str, Any]] = []
     for row in dependency_rows:
         object_type = str(row.get("object_type") or "").upper()
@@ -747,8 +748,10 @@ def validate_dependent_objects(cur, dependency_rows: list[dict[str, Any]]) -> li
             continue
         schema = str(row.get("object_schema") or "")
         name = str(row.get("object_name") or "")
-        if not schema or not name:
+        key = (schema.lower(), object_type, name.lower())
+        if not schema or not name or key in seen:
             continue
+        seen.add(key)
         exists = dependent_object_exists(cur, schema, name, object_type)
         rows.append({
             "source_db": "postgres",
@@ -845,7 +848,14 @@ def set_local_timeouts(cur, *, lock_timeout: str | None = None, statement_timeou
         cur.execute(sql.SQL("SET LOCAL statement_timeout = {}").format(sql.Literal(statement_timeout)))
 
 
-def select_rows(cur, schema: str, table: str, columns: list[str | None], where: str | None = None):
+def select_rows(
+    cur,
+    schema: str,
+    table: str,
+    columns: list[str | None],
+    where: str | None = None,
+    order_by: list[str] | None = None,
+):
     select_items = [sql.SQL("NULL") if col is None else sql.Identifier(col) for col in columns]
     statement = sql.SQL("SELECT {} FROM {}").format(
         sql.SQL(", ").join(select_items),
@@ -853,5 +863,7 @@ def select_rows(cur, schema: str, table: str, columns: list[str | None], where: 
     )
     if where:
         statement += sql.SQL(" WHERE ") + sql.SQL(where)
+    if order_by:
+        statement += sql.SQL(" ORDER BY ") + sql.SQL(", ").join(sql.Identifier(column) for column in order_by)
     cur.execute(statement)
     return cur
