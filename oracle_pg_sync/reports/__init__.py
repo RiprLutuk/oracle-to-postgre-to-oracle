@@ -15,14 +15,12 @@ def write_audit_reports(
     suggest_drop: bool = False,
 ) -> None:
     from oracle_pg_sync.reports.writer_csv import write_csv
-    from oracle_pg_sync.reports.writer_excel import write_inventory_xlsx
     from oracle_pg_sync.reports.writer_html import write_html_report
     from oracle_pg_sync.reports.writer_sql import write_schema_suggestions
     from oracle_pg_sync.dependency_health import summarize_dependency_rows
 
     report_dir.mkdir(parents=True, exist_ok=True)
     write_csv(report_dir / "inventory_summary.csv", inventory_rows)
-    write_inventory_xlsx(report_dir / "inventory_summary.xlsx", inventory_rows)
     write_csv(report_dir / "column_diff.csv", column_diff_rows)
     write_csv(report_dir / "type_mismatch.csv", type_mismatch_rows)
     write_csv(report_dir / "object_dependency_summary.csv", dependency_rows)

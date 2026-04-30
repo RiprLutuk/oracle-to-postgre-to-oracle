@@ -310,7 +310,6 @@ def main(argv: list[str] | None = None) -> int:
             report_files=_run_report_files(
                 run_dir,
                 "inventory_summary.csv",
-                "inventory_summary.xlsx",
                 "column_diff.csv",
                 "type_mismatch.csv",
                 "object_dependency_summary.csv",
@@ -768,7 +767,6 @@ def main(argv: list[str] | None = None) -> int:
                 "validation_checksum.xlsx",
                 "metrics.json",
                 "inventory_summary.csv",
-                "inventory_summary.xlsx",
                 "column_diff.csv",
                 "type_mismatch.csv",
                 "object_dependency_summary.csv",
