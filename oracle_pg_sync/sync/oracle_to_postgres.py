@@ -418,6 +418,35 @@ class OracleToPostgresSync:
                             result.message += f"; incremental filter: {incremental_where}"
                         return result
 
+                    precheck_result = self._precheck_skip_if_rowcount_match(
+                        result,
+                        table_cfg,
+                        mode,
+                        incremental_where,
+                        full_refresh=full_refresh,
+                        ocur=ocur,
+                        pcur=pcur,
+                        owner=owner,
+                        source_table=source_table,
+                        target_schema=table.schema,
+                        target_table=table.table,
+                        where=effective_where,
+                    )
+                    if precheck_result is not None:
+                        if checkpoint_store:
+                            checkpoint_store.record_event(
+                                run_id=run_id,
+                                table_name=table.fqname,
+                                phase="precheck_rowcount",
+                                status="skipped",
+                                message=precheck_result.message,
+                                details={
+                                    "oracle_row_count": precheck_result.oracle_row_count,
+                                    "postgres_row_count": precheck_result.postgres_row_count,
+                                },
+                            )
+                        return precheck_result
+
                     chunks = self._plan_chunks(ocur, owner, source_table, table_cfg, effective_where)
                     successful = checkpoint_store.successful_chunks(run_id, table.fqname) if checkpoint_store and resume else set()
                     load_result = SafeLoadResult(rows_loaded=0)
@@ -1765,6 +1794,69 @@ class OracleToPostgresSync:
 
     def _rowcount_fail_on_mismatch(self, table_cfg: TableConfig) -> bool:
         return bool(table_cfg.validation.rowcount.fail_on_mismatch and self.config.validation.rowcount.fail_on_mismatch)
+
+    def _precheck_skip_if_rowcount_match(
+        self,
+        result: SyncResult,
+        table_cfg: TableConfig,
+        mode: str,
+        incremental_where: str | None,
+        *,
+        full_refresh: bool,
+        ocur,
+        pcur,
+        owner: str,
+        source_table: str,
+        target_schema: str,
+        target_table: str,
+        where: str | None,
+    ) -> SyncResult | None:
+        if not self._should_skip_if_rowcount_match(table_cfg, mode, where, incremental_where, full_refresh=full_refresh):
+            return None
+        result.oracle_row_count, result.postgres_row_count, result.row_count_match = self._safe_rowcount_validation(
+            ocur,
+            pcur,
+            owner,
+            source_table,
+            target_schema,
+            target_table,
+            where,
+        )
+        result.row_count_diff = (result.postgres_row_count or 0) - (result.oracle_row_count or 0)
+        result.validation_status = "validation_pass" if result.row_count_match else "validation_failed"
+        if result.row_count_match is not True:
+            return None
+        result.status = "SKIPPED"
+        result.data_integrity_status = "PASS"
+        result.message = "skip sync: source/target rowcount already match before load"
+        self.logger.info(
+            "Skip %s karena rowcount source/target sudah match sebelum load source=%s target=%s",
+            result.table_name,
+            result.oracle_row_count,
+            result.postgres_row_count,
+        )
+        return result
+
+    def _should_skip_if_rowcount_match(
+        self,
+        table_cfg: TableConfig,
+        mode: str,
+        where: str | None,
+        incremental_where: str | None,
+        *,
+        full_refresh: bool,
+    ) -> bool:
+        if not self.config.sync.skip_if_rowcount_match:
+            return False
+        if mode not in {"truncate", "truncate_safe", "swap", "swap_safe"}:
+            return False
+        if where or incremental_where:
+            return False
+        if table_cfg.where:
+            return False
+        if table_cfg.incremental.enabled and not full_refresh:
+            return False
+        return True
 
     def _safe_rowcount_validation(
         self,

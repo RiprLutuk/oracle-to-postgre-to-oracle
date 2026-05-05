@@ -177,6 +177,15 @@ Execute the load:
 ops sync --config config.yaml --direction oracle-to-postgres --tables public.address --go
 ```
 
+Skip the load when a full refresh table already has the same rowcount on both sides:
+
+```bash
+ops sync --config config.yaml --direction oracle-to-postgres --tables public.address --go --skip-if-rowcount-match
+```
+
+This pre-check only applies to Oracle -> PostgreSQL full refresh modes without a
+`WHERE` filter or active incremental watermark.
+
 Direct truncate with LOB content:
 
 ```bash
@@ -460,7 +469,7 @@ ops validate --config config.yaml --tables A_HP_BATCH --missing-keys
 ops validate missing-keys --config config.yaml --tables A_HP_BATCH
 ```
 
-Missing-key validation requires `key_columns` or `primary_key` in the table config and writes:
+Missing-key validation uses `key_columns` or `primary_key` from config when present. If not, it tries the table `PRIMARY KEY` first and then a `UNIQUE` constraint from Oracle/PostgreSQL. It writes:
 
 - `keys_in_oracle_not_in_postgres.csv`
 - `keys_in_postgres_not_in_oracle.csv`

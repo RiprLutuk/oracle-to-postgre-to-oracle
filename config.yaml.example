@@ -50,6 +50,7 @@ sync:
   cooldown_minutes: 30
   skip_failed_rows: false
   failed_row_sample_limit: 20
+  skip_if_rowcount_match: false
 reports:
   output_dir: reports
 dependency:

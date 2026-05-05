@@ -201,6 +201,43 @@ def fast_count_rows(cur, owner: str, table: str) -> int | None:
     return int(row[0]) if row and row[0] is not None else None
 
 
+def preferred_key_columns(cur, owner: str, table: str) -> list[str]:
+    table_name = resolve_table_name(cur, owner, table)
+    if not table_name:
+        return []
+    cur.execute(
+        """
+        SELECT acc.COLUMN_NAME
+        FROM ALL_CONS_COLUMNS acc
+        WHERE acc.OWNER = :owner
+          AND acc.TABLE_NAME = :tbl
+          AND acc.CONSTRAINT_NAME = (
+              SELECT constraint_name
+              FROM (
+                  SELECT ac.CONSTRAINT_NAME
+                  FROM ALL_CONSTRAINTS ac
+                  WHERE ac.OWNER = :owner
+                    AND ac.TABLE_NAME = :tbl
+                    AND ac.CONSTRAINT_TYPE IN ('P', 'U')
+                  ORDER BY
+                      CASE ac.CONSTRAINT_TYPE
+                          WHEN 'P' THEN 0
+                          ELSE 1
+                      END,
+                      ac.CONSTRAINT_NAME
+              )
+              WHERE ROWNUM = 1
+          )
+        ORDER BY acc.POSITION
+        """,
+        {"owner": owner.upper(), "tbl": table_name},
+    )
+    rows = cur.fetchall()
+    if not rows:
+        return []
+    return [str(row[0]) for row in rows]
+
+
 def get_columns(cur, owner: str, table: str) -> list[dict[str, Any]]:
     table_name = resolve_table_name(cur, owner, table)
     if not table_name:

@@ -19,6 +19,22 @@ Install:
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 ```
 
+## `ops validate` looks stuck on a large table
+
+Rowcount validation uses exact `SELECT COUNT(1)` by default, so large Oracle/PostgreSQL tables can take a while before the next log line appears.
+
+Use:
+
+```bash
+ops validate --config config.yaml --tables public.big_table --fast-count
+```
+
+Notes:
+
+- `--fast-count` uses table statistics only when no `WHERE` filter is active
+- when a table config has `where: ...`, validation falls back to exact count for that side
+- logs now state whether a side is using statistic count or exact `SELECT COUNT(1)`
+
 ## Audit shows `MISMATCH`
 
 Open `column_diff.csv` or the `05_Column_Diff` sheet and look at:

@@ -9,6 +9,7 @@ from oracle_pg_sync.cli import (
     _audit_workers,
     _apply_lob_override,
     _apply_profile,
+    _apply_sync_runtime_overrides,
     _apply_runtime_table_overrides,
     _apply_where_override,
     _compare_sorted_key_streams,
@@ -127,6 +128,7 @@ tables:
                 "--max-db-connections",
                 "6",
                 "--respect-dependencies",
+                "--skip-if-rowcount-match",
             ]
         )
 
@@ -135,6 +137,7 @@ tables:
         self.assertTrue(args.parallel_chunks)
         self.assertEqual(args.max_db_connections, 6)
         self.assertTrue(args.respect_dependencies)
+        self.assertTrue(args.skip_if_rowcount_match)
 
     def test_audit_workers_defaults_to_sync_workers(self):
         args = build_parser().parse_args(["audit"])
@@ -338,6 +341,12 @@ tables:
         self.assertEqual(args.validate_action, "missing-keys")
         self.assertEqual(args.tables, ["A_HP_BATCH"])
 
+    def test_validate_accepts_fast_and_exact_count_flags(self):
+        args = build_parser().parse_args(["validate", "--fast-count", "--exact-count"])
+
+        self.assertTrue(args.fast_count)
+        self.assertTrue(args.exact_count)
+
     def test_missing_key_compare_streams_beyond_sample_limit(self):
         class Cursor:
             def __init__(self, rows):
@@ -409,7 +418,65 @@ tables:
         self.assertEqual(rows[0]["row_count_diff"], 2)
         self.assertEqual(rows[0]["status"], "MISMATCH")
         postgres_count.assert_called_once_with(ANY, "public", "sample", "updated_at >= CURRENT_DATE")
-        oracle_count.assert_called_once_with(ANY, "APP", "sample")
+        oracle_count.assert_called_once_with(ANY, "APP", "sample", None)
+
+    def test_validate_rowcounts_uses_fast_count_when_requested(self):
+        config = AppConfig(
+            oracle=OracleConfig(schema="APP"),
+            postgres=PostgresConfig(schema="public"),
+            tables=[TableConfig(name="public.sample")],
+        )
+
+        with (
+            patch("oracle_pg_sync.db.oracle.connect", return_value=_DummyConnection()),
+            patch("oracle_pg_sync.db.postgres.connect", return_value=_DummyConnection()),
+            patch("oracle_pg_sync.db.oracle.fast_count_rows", return_value=7) as oracle_fast_count,
+            patch("oracle_pg_sync.db.postgres.fast_count_rows", return_value=7) as postgres_fast_count,
+            patch("oracle_pg_sync.db.oracle.count_rows_where") as oracle_exact_count,
+            patch("oracle_pg_sync.db.postgres.count_rows_where") as postgres_exact_count,
+        ):
+            rows = validate_rowcounts(
+                config,
+                ["public.sample"],
+                __import__("logging").getLogger("test_validate_fast_count"),
+                direction="oracle-to-postgres",
+                use_fast_count=True,
+            )
+
+        self.assertEqual(rows[0]["status"], "MATCH")
+        oracle_fast_count.assert_called_once_with(ANY, "APP", "sample")
+        postgres_fast_count.assert_called_once_with(ANY, "public", "sample")
+        oracle_exact_count.assert_not_called()
+        postgres_exact_count.assert_not_called()
+
+    def test_validate_rowcounts_fast_count_falls_back_to_exact_for_where(self):
+        config = AppConfig(
+            oracle=OracleConfig(schema="APP"),
+            postgres=PostgresConfig(schema="public"),
+            tables=[TableConfig(name="public.sample", where="updated_at >= CURRENT_DATE")],
+        )
+
+        with (
+            patch("oracle_pg_sync.db.oracle.connect", return_value=_DummyConnection()),
+            patch("oracle_pg_sync.db.postgres.connect", return_value=_DummyConnection()),
+            patch("oracle_pg_sync.db.oracle.fast_count_rows") as oracle_fast_count,
+            patch("oracle_pg_sync.db.postgres.fast_count_rows", return_value=5) as postgres_fast_count,
+            patch("oracle_pg_sync.db.oracle.count_rows_where", return_value=7) as oracle_exact_count,
+            patch("oracle_pg_sync.db.postgres.count_rows_where", return_value=5) as postgres_exact_count,
+        ):
+            rows = validate_rowcounts(
+                config,
+                ["public.sample"],
+                __import__("logging").getLogger("test_validate_fast_count_where"),
+                direction="oracle-to-postgres",
+                use_fast_count=True,
+            )
+
+        self.assertEqual(rows[0]["status"], "MISMATCH")
+        oracle_fast_count.assert_not_called()
+        postgres_fast_count.assert_called_once_with(ANY, "public", "sample")
+        oracle_exact_count.assert_called_once_with(ANY, "APP", "sample", "updated_at >= CURRENT_DATE")
+        postgres_exact_count.assert_not_called()
 
     def test_validate_missing_keys_supports_postgres_to_oracle(self):
         config = AppConfig(
@@ -441,6 +508,68 @@ tables:
         self.assertEqual(rows[0]["postgres_not_oracle_count"], 1)
         self.assertIn("APP.sample", oracle_not_pg)
         self.assertIn("public.sample", pg_not_oracle)
+
+    def test_validate_missing_keys_uses_preferred_key_from_oracle_when_config_missing(self):
+        config = AppConfig(
+            oracle=OracleConfig(schema="APP"),
+            postgres=PostgresConfig(schema="public"),
+            tables=[TableConfig(name="public.sample")],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("oracle_pg_sync.db.oracle.connect", return_value=_DummyConnection()),
+                patch("oracle_pg_sync.db.postgres.connect", return_value=_DummyConnection()),
+                patch("oracle_pg_sync.db.oracle.preferred_key_columns", return_value=["ID"]) as oracle_keys,
+                patch("oracle_pg_sync.db.postgres.preferred_key_columns", return_value=[]) as postgres_keys,
+                patch("oracle_pg_sync.db.oracle.select_rows", return_value=_Cursor([(1,), (3,)])),
+                patch("oracle_pg_sync.db.postgres.select_rows", return_value=_Cursor([(1,), (2,)])),
+            ):
+                rows = validate_missing_keys(
+                    config,
+                    ["public.sample"],
+                    __import__("logging").getLogger("test_validate_missing_keys_auto_keys"),
+                    direction="oracle-to-postgres",
+                    report_dir=Path(tmp),
+                )
+
+        self.assertEqual(rows[0]["key_columns"], "ID")
+        oracle_keys.assert_called_once_with(ANY, "APP", "sample")
+        postgres_keys.assert_not_called()
+
+    def test_validate_missing_keys_failure_still_writes_manifest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reports_dir = Path(tmp) / "reports"
+            config_path = Path(tmp) / "config.yaml"
+            config_path.write_text(
+                f"""
+oracle:
+  schema: APP
+postgres:
+  schema: public
+reports:
+  output_dir: {reports_dir}
+sync:
+  checkpoint_dir: {reports_dir}/checkpoints/checkpoint.sqlite3
+tables:
+  - public.sample
+""",
+                encoding="utf-8",
+            )
+
+            with (
+                patch("oracle_pg_sync.db.oracle.connect", return_value=_DummyConnection()),
+                patch("oracle_pg_sync.db.postgres.connect", return_value=_DummyConnection()),
+                patch("oracle_pg_sync.db.oracle.preferred_key_columns", return_value=[]),
+                patch("oracle_pg_sync.db.postgres.preferred_key_columns", return_value=[]),
+                self.assertRaisesRegex(SystemExit, "requires key_columns/primary_key"),
+            ):
+                cli_main(["validate", "missing-keys", "--config", str(config_path), "--tables", "public.sample"])
+
+            run_dirs = sorted(reports_dir.glob("run_*"))
+            manifest = (run_dirs[0] / "manifest.json").read_text(encoding="utf-8")
+
+        self.assertIn("requires key_columns/primary_key", manifest)
 
     def test_sync_accepts_safe_modes_and_simulate(self):
         args = build_parser().parse_args(["sync", "--mode", "truncate_safe", "--simulate"])
@@ -520,6 +649,18 @@ tables:
         self.assertEqual(table_cfg.where, "last_update >= CURRENT_DATE")
         self.assertTrue(table_cfg.incremental.enabled)
         self.assertEqual(table_cfg.incremental.column, "last_update")
+
+    def test_sync_runtime_overrides_apply_skip_if_rowcount_match(self):
+        config = AppConfig(
+            oracle=OracleConfig(),
+            postgres=PostgresConfig(),
+            sync=SyncConfig(skip_if_rowcount_match=False),
+        )
+        args = build_parser().parse_args(["sync", "--skip-if-rowcount-match"])
+
+        _apply_sync_runtime_overrides(args, config)
+
+        self.assertTrue(config.sync.skip_if_rowcount_match)
 
     def test_lob_override_updates_default_strategy(self):
         config = AppConfig(oracle=OracleConfig(), postgres=PostgresConfig())

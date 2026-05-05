@@ -77,6 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
     sync.add_argument("--simulate", action="store_true", help="Risk simulation only; no data changes")
     sync.add_argument("--no-rowcount-validation", action="store_true", help="Disable post-load rowcount validation")
     sync.add_argument("--rowcount-only", action="store_true", help="Only validate rowcounts; do not load data")
+    sync.add_argument(
+        "--skip-if-rowcount-match",
+        action="store_true",
+        help="Skip full refresh Oracle->PostgreSQL sync when source/target rowcount already match",
+    )
     _add_production_sync_args(sync)
 
     validate = sub.add_parser("validate", help="Validate rowcount/checksum/missing keys")
@@ -85,6 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--tables", nargs="*", help="Override table list")
     validate.add_argument("--tables-file", help="Read table list from YAML/JSON file")
     validate.add_argument("--direction", choices=["oracle-to-postgres", "postgres-to-oracle"], help="Validation direction")
+    validate.add_argument("--fast-count", action="store_true", help="Use statistic count when no WHERE filter is applied")
+    validate.add_argument("--exact-count", action="store_true", help="Use SELECT COUNT(1) for rowcount validation")
     validate.add_argument("--missing-keys", action="store_true", help="Compare configured keys and write missing-key CSVs")
 
     report = sub.add_parser("report", help="Generate report.html dari CSV latest run")
@@ -141,6 +148,11 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd.add_argument("--simulate", action="store_true", help="Risk simulation only; no data changes")
     all_cmd.add_argument("--no-rowcount-validation", action="store_true", help="Disable post-load rowcount validation")
     all_cmd.add_argument("--rowcount-only", action="store_true", help="Only validate rowcounts; do not load data")
+    all_cmd.add_argument(
+        "--skip-if-rowcount-match",
+        action="store_true",
+        help="Skip full refresh Oracle->PostgreSQL sync when source/target rowcount already match",
+    )
     _add_production_sync_args(all_cmd)
     all_cmd.add_argument("--fast-count", action="store_true", help="Use statistic count")
     all_cmd.add_argument("--exact-count", action="store_true", help="Use SELECT COUNT(1)")
@@ -342,31 +354,54 @@ def main(argv: list[str] | None = None) -> int:
         run_dir.mkdir(parents=True, exist_ok=True)
         attach_run_log(logger, run_dir)
         logger.info("Run log dibuat: %s", run_dir / "logs.txt")
-        if args.validate_action == "missing-keys" or args.missing_keys:
-            rows = validate_missing_keys(config, tables, logger, direction=direction or "oracle-to-postgres", report_dir=run_dir)
-            write_csv(run_dir / "missing_keys_summary.csv", rows)
+        try:
+            if args.validate_action == "missing-keys" or args.missing_keys:
+                rows = validate_missing_keys(config, tables, logger, direction=direction or "oracle-to-postgres", report_dir=run_dir)
+                write_csv(run_dir / "missing_keys_summary.csv", rows)
+                _copy_log_to_run_dir(report_dir, run_dir)
+                manifest_path = manifest.finish(
+                    result_rows=rows,
+                    report_files=_run_report_files(
+                        run_dir,
+                        "missing_keys_summary.csv",
+                        "keys_in_oracle_not_in_postgres.csv",
+                        "keys_in_postgres_not_in_oracle.csv",
+                        "logs.txt",
+                    ),
+                )
+                logger.info("Manifest dibuat: %s", manifest_path)
+                return 1 if any(row.get("status") == "MISMATCH" for row in rows) else 0
+            rows = validate_rowcounts(
+                config,
+                tables,
+                logger,
+                direction=direction or "oracle-to-postgres",
+                use_fast_count=getattr(args, "fast_count", False),
+            )
+            write_csv(run_dir / "rowcount_validation.csv", rows)
             _copy_log_to_run_dir(report_dir, run_dir)
             manifest_path = manifest.finish(
                 result_rows=rows,
+                report_files=_run_report_files(run_dir, "rowcount_validation.csv", "logs.txt"),
+            )
+            logger.info("Manifest dibuat: %s", manifest_path)
+            return 1 if any(row.get("status") == "MISMATCH" for row in rows) else 0
+        except SystemExit as exc:
+            _copy_log_to_run_dir(report_dir, run_dir)
+            manifest_path = manifest.finish(
+                result_rows=[],
                 report_files=_run_report_files(
                     run_dir,
                     "missing_keys_summary.csv",
                     "keys_in_oracle_not_in_postgres.csv",
                     "keys_in_postgres_not_in_oracle.csv",
+                    "rowcount_validation.csv",
                     "logs.txt",
                 ),
+                errors=[str(exc)],
             )
             logger.info("Manifest dibuat: %s", manifest_path)
-            return 1 if any(row.get("status") == "MISMATCH" for row in rows) else 0
-        rows = validate_rowcounts(config, tables, logger, direction=direction or "oracle-to-postgres")
-        write_csv(run_dir / "rowcount_validation.csv", rows)
-        _copy_log_to_run_dir(report_dir, run_dir)
-        manifest_path = manifest.finish(
-            result_rows=rows,
-            report_files=_run_report_files(run_dir, "rowcount_validation.csv", "logs.txt"),
-        )
-        logger.info("Manifest dibuat: %s", manifest_path)
-        return 1 if any(row.get("status") == "MISMATCH" for row in rows) else 0
+            raise
 
     if args.command == "sync":
         from oracle_pg_sync.reports.writer_csv import write_csv
@@ -391,7 +426,13 @@ def main(argv: list[str] | None = None) -> int:
         attach_run_log(logger, run_dir)
         logger.info("Run log dibuat: %s", run_dir / "logs.txt")
         if getattr(args, "rowcount_only", False):
-            rows = validate_rowcounts(config, tables, logger, direction=direction or "oracle-to-postgres")
+            rows = validate_rowcounts(
+                config,
+                tables,
+                logger,
+                direction=direction or "oracle-to-postgres",
+                use_fast_count=getattr(args, "fast_count", False),
+            )
             write_csv(run_dir / "rowcount_validation.csv", rows)
             _copy_log_to_run_dir(report_dir, run_dir)
             manifest_path = manifest.finish(
@@ -853,7 +894,39 @@ def run_audit(config: AppConfig, tables: list[str], logger: logging.Logger, *, w
     return AuditResult(inventory_rows, column_diff_rows, type_mismatch_rows, dependency_rows)
 
 
-def validate_rowcounts(config: AppConfig, tables: list[str], logger: logging.Logger, *, direction: str) -> list[dict]:
+def _validation_rowcount(
+    cur,
+    schema: str,
+    table: str,
+    where: str | None,
+    *,
+    db_label: str,
+    logger: logging.Logger,
+    use_fast_count: bool,
+    fast_counter,
+    exact_counter,
+) -> int:
+    if use_fast_count and not where:
+        logger.info("Rowcount %s %s.%s memakai statistic count", db_label, schema, table)
+        count = fast_counter(cur, schema, table)
+        if count is not None:
+            return count
+        logger.warning("Statistic rowcount %s %s.%s tidak tersedia; fallback ke SELECT COUNT(1)", db_label, schema, table)
+    elif where:
+        logger.info("Rowcount %s %s.%s memakai SELECT COUNT(1) karena WHERE filter aktif", db_label, schema, table)
+    else:
+        logger.info("Rowcount %s %s.%s memakai SELECT COUNT(1)", db_label, schema, table)
+    return exact_counter(cur, schema, table, where)
+
+
+def validate_rowcounts(
+    config: AppConfig,
+    tables: list[str],
+    logger: logging.Logger,
+    *,
+    direction: str,
+    use_fast_count: bool = False,
+) -> list[dict]:
     from oracle_pg_sync.db import oracle, postgres
 
     if direction not in {"oracle-to-postgres", "postgres-to-oracle"}:
@@ -873,16 +946,56 @@ def validate_rowcounts(config: AppConfig, tables: list[str], logger: logging.Log
                     source_table = oracle_table
                     target_schema = pg_schema
                     target_table = pg_table
-                    oracle_count = oracle.count_rows_where(ocur, oracle_schema, oracle_table, table_cfg.where)
-                    postgres_count = postgres.count_rows_where(pcur, pg_schema, pg_table)
+                    oracle_count = _validation_rowcount(
+                        ocur,
+                        oracle_schema,
+                        oracle_table,
+                        table_cfg.where,
+                        db_label="oracle",
+                        logger=logger,
+                        use_fast_count=use_fast_count,
+                        fast_counter=oracle.fast_count_rows,
+                        exact_counter=oracle.count_rows_where,
+                    )
+                    postgres_count = _validation_rowcount(
+                        pcur,
+                        pg_schema,
+                        pg_table,
+                        None,
+                        db_label="postgres",
+                        logger=logger,
+                        use_fast_count=use_fast_count,
+                        fast_counter=postgres.fast_count_rows,
+                        exact_counter=postgres.count_rows_where,
+                    )
                     diff = postgres_count - oracle_count
                 else:
                     source_schema = pg_schema
                     source_table = pg_table
                     target_schema = oracle_schema
                     target_table = oracle_table
-                    postgres_count = postgres.count_rows_where(pcur, pg_schema, pg_table, table_cfg.where)
-                    oracle_count = oracle.count_rows_where(ocur, oracle_schema, oracle_table)
+                    postgres_count = _validation_rowcount(
+                        pcur,
+                        pg_schema,
+                        pg_table,
+                        table_cfg.where,
+                        db_label="postgres",
+                        logger=logger,
+                        use_fast_count=use_fast_count,
+                        fast_counter=postgres.fast_count_rows,
+                        exact_counter=postgres.count_rows_where,
+                    )
+                    oracle_count = _validation_rowcount(
+                        ocur,
+                        oracle_schema,
+                        oracle_table,
+                        None,
+                        db_label="oracle",
+                        logger=logger,
+                        use_fast_count=use_fast_count,
+                        fast_counter=oracle.fast_count_rows,
+                        exact_counter=oracle.count_rows_where,
+                    )
                     diff = oracle_count - postgres_count
                 logger.info(
                     "Rowcount %s %s -> %s.%s to %s.%s diff=%s",
@@ -944,14 +1057,23 @@ def validate_missing_keys(
         with ocon.cursor() as ocur, pcon.cursor() as pcur:
             for table_name in tables:
                 table_cfg = config.table_config(table_name) or TableConfig(name=table_name)
-                keys = table_cfg.key_columns or table_cfg.primary_key
-                if not keys:
-                    raise SystemExit("missing key comparison requires key_columns or primary_key")
                 target = split_schema_table(table_cfg.name, config.postgres.schema)
                 pg_schema = table_cfg.target_schema or target.schema
                 pg_table = table_cfg.target_table or target.table
                 oracle_schema = table_cfg.source_schema or config.oracle.schema
                 oracle_table = table_cfg.source_table or target.table
+                keys = _resolve_missing_key_columns(
+                    table_name,
+                    table_cfg,
+                    logger,
+                    direction=direction,
+                    ocur=ocur,
+                    pcur=pcur,
+                    oracle_schema=oracle_schema,
+                    oracle_table=oracle_table,
+                    pg_schema=pg_schema,
+                    pg_table=pg_table,
+                )
                 oracle_cursor = oracle.select_rows(
                     ocur,
                     oracle_schema,
@@ -1005,6 +1127,52 @@ def validate_missing_keys(
     write_csv(report_dir / "keys_in_oracle_not_in_postgres.csv", oracle_missing_rows)
     write_csv(report_dir / "keys_in_postgres_not_in_oracle.csv", postgres_missing_rows)
     return summary
+
+
+def _resolve_missing_key_columns(
+    table_name: str,
+    table_cfg: TableConfig,
+    logger: logging.Logger,
+    *,
+    direction: str,
+    ocur,
+    pcur,
+    oracle_schema: str,
+    oracle_table: str,
+    pg_schema: str,
+    pg_table: str,
+) -> list[str]:
+    from oracle_pg_sync.db import oracle, postgres
+
+    keys = table_cfg.key_columns or table_cfg.primary_key
+    if keys:
+        logger.info("Missing keys %s memakai key dari config: %s", table_name, ",".join(keys))
+        return keys
+    logger.info("Missing keys %s tidak punya key di config; cek constraint database", table_name)
+    if direction == "oracle-to-postgres":
+        candidate_loaders = [
+            ("Oracle", lambda: oracle.preferred_key_columns(ocur, oracle_schema, oracle_table)),
+            ("PostgreSQL", lambda: postgres.preferred_key_columns(pcur, pg_schema, pg_table)),
+        ]
+    else:
+        candidate_loaders = [
+            ("PostgreSQL", lambda: postgres.preferred_key_columns(pcur, pg_schema, pg_table)),
+            ("Oracle", lambda: oracle.preferred_key_columns(ocur, oracle_schema, oracle_table)),
+        ]
+    for source_name, loader in candidate_loaders:
+        candidate = loader()
+        if candidate:
+            logger.info(
+                "Missing keys %s memakai key dari %s: %s",
+                table_name,
+                source_name,
+                ",".join(candidate),
+            )
+            return candidate
+        logger.info("Missing keys %s: %s tidak punya PRIMARY KEY/UNIQUE constraint yang bisa dipakai", table_name, source_name)
+    raise SystemExit(
+        "missing key comparison requires key_columns/primary_key in config or a PRIMARY KEY/UNIQUE constraint in Oracle/PostgreSQL"
+    )
 
 
 class _KeyDiff:
@@ -1316,6 +1484,8 @@ def _apply_sync_runtime_overrides(args: argparse.Namespace, config: AppConfig) -
         config.sync.max_db_connections = max(1, int(args.max_db_connections))
     if hasattr(args, "respect_dependencies"):
         config.sync.respect_dependencies = bool(args.respect_dependencies)
+    if hasattr(args, "skip_if_rowcount_match"):
+        config.sync.skip_if_rowcount_match = bool(args.skip_if_rowcount_match)
 
 
 def _audit_workers(args: argparse.Namespace, config: AppConfig) -> int:

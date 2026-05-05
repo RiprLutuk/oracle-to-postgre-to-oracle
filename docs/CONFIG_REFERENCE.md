@@ -83,6 +83,7 @@ Important fields:
 - `cooldown_minutes`
 - `skip_failed_rows`: default `false`; keep false so conversion/COPY errors fail the table
 - `failed_row_sample_limit`: maximum row error samples stored in reports
+- `skip_if_rowcount_match`: default `false`; for Oracle -> PostgreSQL full refresh only, skip load when source/target rowcount already match before copy
 
 Current checkpoint storage is SQLite and lives under `sync.checkpoint_dir`.
 

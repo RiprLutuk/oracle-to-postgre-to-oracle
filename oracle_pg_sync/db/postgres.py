@@ -110,6 +110,37 @@ def fast_count_rows(cur, schema: str, table: str) -> int | None:
     return int(row[0]) if row and row[0] is not None else None
 
 
+def preferred_key_columns(cur, schema: str, table: str) -> list[str]:
+    cur.execute(
+        """
+        WITH preferred_constraint AS (
+            SELECT con.oid, con.contype
+            FROM pg_constraint con
+            JOIN pg_class c ON c.oid = con.conrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s
+              AND c.relname = %s
+              AND con.contype IN ('p', 'u')
+            ORDER BY
+                CASE con.contype
+                    WHEN 'p' THEN 0
+                    ELSE 1
+                END,
+                con.conname
+            LIMIT 1
+        )
+        SELECT att.attname
+        FROM preferred_constraint pc
+        JOIN pg_constraint con ON con.oid = pc.oid
+        JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS cols(attnum, ord) ON TRUE
+        JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = cols.attnum
+        ORDER BY cols.ord
+        """,
+        (schema, table),
+    )
+    return [str(row[0]) for row in cur.fetchall()]
+
+
 def total_relation_size_bytes(cur, schema: str, table: str) -> int | None:
     cur.execute(
         """

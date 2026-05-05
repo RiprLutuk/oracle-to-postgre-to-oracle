@@ -22,7 +22,7 @@ if "oracledb" not in sys.modules:
     oracledb_stub.makedsn = lambda host, port, service_name=None, sid=None: "oracle-dsn"
     sys.modules["oracledb"] = oracledb_stub
 
-from oracle_pg_sync.config import AppConfig, OracleConfig, PostgresConfig, SyncConfig
+from oracle_pg_sync.config import AppConfig, OracleConfig, PostgresConfig, SyncConfig, TableConfig
 from oracle_pg_sync.sync.oracle_to_postgres import OracleToPostgresSync, SyncResult
 from oracle_pg_sync.sync.runtime import SyncExecutionContext
 
@@ -135,6 +135,63 @@ class OracleToPostgresSyncTest(unittest.TestCase):
         result.rows_written_to_postgres = 3
 
         self.assertEqual(sync._data_integrity_status(result), "UNKNOWN")
+
+    def test_skip_if_rowcount_match_precheck_requires_explicit_flag_and_full_refresh_shape(self):
+        sync = OracleToPostgresSync(
+            AppConfig(
+                oracle=OracleConfig(schema="APP"),
+                postgres=PostgresConfig(schema="public"),
+                sync=SyncConfig(skip_if_rowcount_match=True),
+            )
+        )
+        table_cfg = TableConfig(name="public.sample")
+
+        self.assertTrue(
+            sync._should_skip_if_rowcount_match(
+                table_cfg,
+                "truncate_safe",
+                None,
+                None,
+                full_refresh=False,
+            )
+        )
+        self.assertFalse(
+            sync._should_skip_if_rowcount_match(
+                table_cfg,
+                "append",
+                None,
+                None,
+                full_refresh=False,
+            )
+        )
+        self.assertFalse(
+            sync._should_skip_if_rowcount_match(
+                table_cfg,
+                "truncate_safe",
+                "status = 'A'",
+                None,
+                full_refresh=False,
+            )
+        )
+        table_cfg.incremental.enabled = True
+        self.assertFalse(
+            sync._should_skip_if_rowcount_match(
+                table_cfg,
+                "truncate_safe",
+                None,
+                None,
+                full_refresh=False,
+            )
+        )
+        self.assertTrue(
+            sync._should_skip_if_rowcount_match(
+                table_cfg,
+                "truncate_safe",
+                None,
+                None,
+                full_refresh=True,
+            )
+        )
 
     def test_sync_tables_parallel_executes_all_tables(self):
         class FakeExecutionContext:

@@ -226,6 +226,7 @@ class SyncConfig:
     cooldown_minutes: int = 30
     skip_failed_rows: bool = False
     failed_row_sample_limit: int = 20
+    skip_if_rowcount_match: bool = False
 
     def __post_init__(self) -> None:
         legacy_workers = int(self.parallel_workers or 0)

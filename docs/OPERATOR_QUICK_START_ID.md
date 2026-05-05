@@ -118,7 +118,7 @@ Rowcount:
 ops validate --config config.yaml --tables public.nama_table
 ```
 
-Missing/extra key, jika `key_columns` sudah diset:
+Missing/extra key. Jika `key_columns` belum diset, CLI akan mencoba `PRIMARY KEY` lalu `UNIQUE` constraint dari Oracle/PostgreSQL:
 
 ```bash
 ops validate missing-keys --config config.yaml --tables public.nama_table
