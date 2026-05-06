@@ -280,7 +280,7 @@ class PostgresToOracleSync:
                     )
                     if inventory_has_fatal_mismatch(inventory) and not force:
                         result.status = "SKIPPED"
-                        result.message = "struktur/table mismatch; gunakan --force jika tetap ingin reverse sync"
+                        result.message = _reverse_schema_mismatch_message(inventory)
                         return result
 
                     mapping = self._column_mapping(table.fqname, pg_meta.columns, oracle_meta.columns)
@@ -713,6 +713,26 @@ def _combine_where(left: str | None, right: str | None) -> str | None:
     if left and right:
         return f"({left}) AND ({right})"
     return left or right
+
+
+def _reverse_schema_mismatch_message(inventory: dict[str, Any]) -> str:
+    details = [
+        "struktur/table mismatch",
+        f"oracle_exists={inventory.get('oracle_exists')}",
+        f"postgres_exists={inventory.get('postgres_exists')}",
+        f"oracle_columns={inventory.get('oracle_column_count')}",
+        f"postgres_columns={inventory.get('postgres_column_count')}",
+        f"schema_errors={inventory.get('schema_diff_error_count')}",
+        f"schema_warnings={inventory.get('schema_diff_warning_count')}",
+    ]
+    oracle_only_columns = str(inventory.get("missing_columns_in_pg") or "")
+    postgres_only_columns = str(inventory.get("extra_columns_in_pg") or "")
+    if oracle_only_columns:
+        details.append(f"oracle_only_columns={oracle_only_columns}")
+    if postgres_only_columns:
+        details.append(f"postgres_only_columns={postgres_only_columns}")
+    details.append("gunakan --force hanya setelah review mapping")
+    return "; ".join(details)
 
 
 def _pg_qident(name: str) -> str:

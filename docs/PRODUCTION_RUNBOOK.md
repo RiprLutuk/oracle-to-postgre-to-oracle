@@ -97,10 +97,10 @@ a DBA-approved restore path for destructive reverse full refreshes.
 ops sync \
   --config config.yaml \
   --direction postgres-to-oracle \
-  --tables public.address \
+  --tables public.sample_customer \
   --mode upsert \
-  --key-columns address_id \
-  --incremental-column last_update \
+  --key-columns customer_id \
+  --incremental-column updated_at \
   --incremental
 ```
 
@@ -110,10 +110,10 @@ ops sync \
 ops sync \
   --config config.yaml \
   --direction postgres-to-oracle \
-  --tables public.address \
+  --tables public.sample_customer \
   --mode upsert \
-  --key-columns address_id \
-  --incremental-column last_update \
+  --key-columns customer_id \
+  --incremental-column updated_at \
   --incremental \
   --go
 ```
@@ -124,8 +124,8 @@ ops sync \
 - no checksum mismatch
 - `data_integrity_status` is `PASS` when validation scope is complete
 - no critical dependency failures after the run
-- `ops validate --direction postgres-to-oracle --tables public.address` is clean
-- `ops validate missing-keys --direction postgres-to-oracle --tables public.address` is clean when keys are configured
+- `ops validate --direction postgres-to-oracle --tables public.sample_customer` is clean
+- `ops validate missing-keys --direction postgres-to-oracle --tables public.sample_customer` is clean when keys are configured
 
 For reverse full replace, use only during a maintenance window:
 
@@ -161,7 +161,7 @@ Incremental:
 
 ```bash
 jobs/incremental.sh oracle_to_pg
-jobs/incremental.sh pg_to_oracle --tables public.address --mode upsert --key-columns address_id --incremental-column last_update
+jobs/incremental.sh pg_to_oracle --tables public.sample_customer --mode upsert --key-columns customer_id --incremental-column updated_at
 ```
 
 Job wrapper guarantees:
@@ -191,7 +191,7 @@ ops resume --config config.yaml
 
 ```bash
 ops watermarks --config config.yaml
-ops reset-watermark public.address --config config.yaml
+ops reset-watermark public.sample_customer --config config.yaml
 ```
 
 6. If the run reached dependency failure after data cutover, restore the last safe backup:
@@ -276,7 +276,7 @@ ops circuit-breaker list --config config.yaml
 Reset a circuit only after the failed data path is verified or rolled back:
 
 ```bash
-ops circuit-breaker reset --table public.address --config config.yaml
+ops circuit-breaker reset --table public.sample_customer --config config.yaml
 ```
 
 Reset every circuit entry only during controlled recovery:

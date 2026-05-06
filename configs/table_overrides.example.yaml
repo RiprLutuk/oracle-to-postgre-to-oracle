@@ -3,18 +3,18 @@
 # Merge the relevant blocks into config.yaml before running the tool.
 
 tables:
-  - name: public.address
+  - name: public.sample_customer
     directions:
       - oracle-to-postgres
       - postgres-to-oracle
     oracle_to_postgres_mode: truncate_safe
     postgres_to_oracle_mode: upsert
     key_columns:
-      - address_id
+      - customer_id
     incremental:
       enabled: true
       strategy: updated_at
-      column: last_update
+      column: updated_at
       overlap_minutes: 5
     validation:
       rowcount:

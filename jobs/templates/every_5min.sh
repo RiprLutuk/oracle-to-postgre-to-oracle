@@ -7,7 +7,7 @@ CONFIG_PATH="${CONFIG_PATH:-$APP_DIR/config.yaml}"
 SYNC_DIRECTION="${SYNC_DIRECTION:-pg_to_oracle}"
 RETRY="${RETRY:-3}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-3600}"
-ALERT_COMMAND="${ALERT_COMMAND:-echo FAILED}"
+ALERT_COMMAND="${ALERT_COMMAND:-printf '%s\n' \"\$ALERT_MESSAGE\"}"
 
 cd "$APP_DIR"
 RETRY="$RETRY" \
@@ -16,7 +16,7 @@ ALERT_COMMAND="$ALERT_COMMAND" \
 CONFIG_PATH="$CONFIG_PATH" \
   jobs/incremental.sh \
   "$SYNC_DIRECTION" \
-  --tables public.address \
+  --tables public.sample_customer \
   --mode upsert \
-  --key-columns address_id \
-  --incremental-column last_update
+  --key-columns customer_id \
+  --incremental-column updated_at

@@ -110,8 +110,8 @@ kept list-only:
 
 ```yaml
 tables:
-  - public.address
-  - public.housemaster
+  - public.sample_customer
+  - public.sample_order
 ```
 
 Keep per-table defaults and overrides in `config.yaml`. If your team prefers a
@@ -137,7 +137,7 @@ Important diff behavior:
 Useful audit variants:
 
 ```bash
-oracle-pg-sync-audit audit --config config.yaml --tables public.address public.housemaster
+oracle-pg-sync-audit audit --config config.yaml --tables public.sample_customer public.sample_order
 oracle-pg-sync-audit audit --config config.yaml --all-postgres-tables --fast-count
 oracle-pg-sync-audit audit --config config.yaml --workers 4 --suggest-drop
 oracle-pg-sync-audit audit-objects --config config.yaml
@@ -160,19 +160,19 @@ Production-safe modes:
 Dry-run is the default:
 
 ```bash
-ops sync --config config.yaml --direction oracle-to-postgres --tables public.address
+ops sync --config config.yaml --direction oracle-to-postgres --tables public.sample_customer
 ```
 
 Execute the load:
 
 ```bash
-ops sync --config config.yaml --direction oracle-to-postgres --tables public.address --go
+ops sync --config config.yaml --direction oracle-to-postgres --tables public.sample_customer --go
 ```
 
 Skip the load when a full refresh table already has the same rowcount on both sides:
 
 ```bash
-ops sync --config config.yaml --direction oracle-to-postgres --tables public.address --go --skip-if-rowcount-match
+ops sync --config config.yaml --direction oracle-to-postgres --tables public.sample_customer --go --skip-if-rowcount-match
 ```
 
 This pre-check only applies to Oracle -> PostgreSQL full refresh modes without a
@@ -227,13 +227,13 @@ Reverse sync supports:
 Dry-run:
 
 ```bash
-ops sync --config config.yaml --direction postgres-to-oracle --tables public.address --mode upsert
+ops sync --config config.yaml --direction postgres-to-oracle --tables public.sample_customer --mode upsert
 ```
 
 Execute:
 
 ```bash
-ops sync --config config.yaml --direction postgres-to-oracle --tables public.address --mode upsert --go
+ops sync --config config.yaml --direction postgres-to-oracle --tables public.sample_customer --mode upsert --go
 ```
 
 Single-table incremental override from CLI:
@@ -242,10 +242,10 @@ Single-table incremental override from CLI:
 ops sync \
   --config config.yaml \
   --direction postgres-to-oracle \
-  --tables public.address \
+  --tables public.sample_customer \
   --mode upsert \
-  --key-columns address_id \
-  --incremental-column last_update \
+  --key-columns customer_id \
+  --incremental-column updated_at \
   --incremental \
   --go
 ```
@@ -310,7 +310,7 @@ ops status --config config.yaml
 ops resume --config config.yaml
 ops resume RUN_ID --config config.yaml
 ops watermarks --config config.yaml
-ops reset-watermark public.address --config config.yaml
+ops reset-watermark public.sample_customer --config config.yaml
 oracle-pg-sync-audit sync --config config.yaml --list-runs
 ```
 
@@ -356,7 +356,7 @@ Analyze LOB-heavy tables:
 
 ```bash
 ops analyze lob --config config.yaml
-ops analyze lob --config config.yaml --tables public.address
+ops analyze lob --config config.yaml --tables public.sample_customer
 ```
 
 LOB analysis reports classification plus recommendation:
@@ -486,8 +486,22 @@ Examples:
 
 ```bash
 ./jobs/daily.sh oracle_to_pg
-./jobs/incremental.sh pg_to_oracle --tables public.address --mode upsert --key-columns address_id --incremental-column last_update
+./jobs/incremental.sh pg_to_oracle --tables public.sample_customer --mode upsert --key-columns customer_id --incremental-column updated_at
 ```
+
+Per-minute local reverse wrapper example:
+
+```bash
+P2O_1MIN_DRY_RUN=1 ./jobs/pg_to_oracle_every_1min.sh
+P2O_1MIN_DRY_RUN=0 ./jobs/pg_to_oracle_every_1min.sh
+```
+
+`jobs/pg_to_oracle_every_1min.sh` is intentionally ignored by git because the
+table/key list is environment-specific. It writes one centralized summary log
+to `reports/job_logs/every_1min_pg_to_oracle.log`; raw per-table logs are kept
+only for failures unless `P2O_1MIN_KEEP_RAW_LOGS=1` is set. See
+[`DBA_DAILY_OPERATIONS.md`](DBA_DAILY_OPERATIONS.md#cron-postgresql---oracle-per-menit)
+for a complete crontab example.
 
 Job wrapper behavior:
 

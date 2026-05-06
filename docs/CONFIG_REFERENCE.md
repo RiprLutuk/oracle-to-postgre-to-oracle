@@ -146,7 +146,7 @@ Webhook/email alerts use the structured payload:
   "run_id": "abc123",
   "direction": "oracle-to-postgres",
   "error": "dependency validation failed",
-  "failed_tables": ["public.address"]
+  "failed_tables": ["public.sample_customer"]
 }
 ```
 
@@ -213,7 +213,7 @@ lob_strategy:
   warn_on_lob_larger_than_mb: 50
   fail_on_lob_larger_than_mb: null
   columns:
-    public.address.payload:
+    public.sample_customer.payload:
       strategy: stream
       target_type: bytea
       validation: size_hash
@@ -259,8 +259,8 @@ Recommended external table file:
 
 ```yaml
 tables:
-  - public.address
-  - public.housemaster
+  - public.sample_customer
+  - public.sample_order
 ```
 
 Keep `configs/tables.yaml` list-only so scope review stays simple. Put per-table
@@ -293,14 +293,14 @@ Example inline override block in `config.yaml`:
 
 ```yaml
 tables:
-  - name: public.address
+  - name: public.sample_customer
     directions:
       - oracle-to-postgres
       - postgres-to-oracle
     oracle_to_postgres_mode: truncate_safe
     postgres_to_oracle_mode: upsert
     key_columns:
-      - address_id
+      - customer_id
 ```
 
 Manual `--tables` resolution is deterministic:
@@ -319,7 +319,7 @@ If multiple configured tables match at the same priority, the command fails and 
 incremental:
   enabled: true
   strategy: updated_at
-  column: last_update
+  column: updated_at
   initial_value: 2026-01-01T00:00:00
   overlap_minutes: 5
   delete_detection: false

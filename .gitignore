@@ -24,6 +24,7 @@ reports/*.sql
 reports/checkpoints/
 reports/run_*/
 !reports/.gitkeep
+jobs/pg_to_oracle_every_1min.sh
 local/private/
 *.log
 *.pem

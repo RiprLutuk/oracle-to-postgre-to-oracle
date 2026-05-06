@@ -92,9 +92,9 @@ Isi `configs/tables.yaml` cukup daftar table supaya mudah dibaca:
 
 ```yaml
 tables:
-  - public.address
-  - public.housemaster
-  - public.a_hp_house_info
+  - public.sample_customer
+  - public.sample_order
+  - public.sample_blob_table
 ```
 
 Jaga `configs/tables.yaml` tetap list-only. Simpan default atau override per-table
@@ -133,11 +133,11 @@ Reverse sync example:
 ```bash
 ops sync --config config.yaml \
   --direction postgres-to-oracle \
-  --tables public.address \
+  --tables public.sample_customer \
   --mode upsert \
-  --key-columns address_id \
-  --incremental-column last_update \
-  --where "last_update >= CURRENT_TIMESTAMP - INTERVAL '5 minutes'" \
+  --key-columns customer_id \
+  --incremental-column updated_at \
+  --where "updated_at >= CURRENT_TIMESTAMP - INTERVAL '5 minutes'" \
   --incremental
 ```
 

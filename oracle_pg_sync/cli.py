@@ -319,6 +319,12 @@ def _add_production_sync_args(parser: argparse.ArgumentParser) -> None:
         default=argparse.SUPPRESS,
         help="Preserve configured table order and disable table parallelism for dependency-sensitive runs",
     )
+    parser.add_argument(
+        "--skip-dependencies",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Skip dependency pre/post reports and maintenance for latency-sensitive scheduled sync",
+    )
     parser.add_argument("--resume", metavar="RUN_ID", help="Resume sync run from checkpoint")
     parser.add_argument(
         "--reset-checkpoint",
@@ -654,7 +660,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             logger.info("Manifest dibuat: %s", manifest_path)
             return 1 if any(row.get("status") == "MISMATCH" for row in rows) else 0
-        dependency_pre_rows = _write_dependency_report(config, tables, logger, run_dir, phase="pre")
+        skip_dependencies = bool(getattr(args, "skip_dependencies", False))
+        if skip_dependencies:
+            logger.info("Dependency reports skipped by --skip-dependencies")
+            dependency_pre_rows: list[dict] = []
+        else:
+            dependency_pre_rows = _write_dependency_report(config, tables, logger, run_dir, phase="pre")
         results = _sync_runner(config, logger, direction).sync_tables(
             tables,
             mode_override=args.mode,
@@ -677,15 +688,19 @@ def main(argv: list[str] | None = None) -> int:
                 checksum_rows,
                 sheet_name="checksum",
             )
-        maintenance_rows = _run_dependency_maintenance(
-            config,
-            tables,
-            logger,
-            run_dir,
-            dependency_pre_rows,
-            execute=args.execute,
-        )
-        dependency_post_rows = _write_dependency_report(config, tables, logger, run_dir, phase="post")
+        if skip_dependencies:
+            maintenance_rows: list[dict] = []
+            dependency_post_rows: list[dict] = []
+        else:
+            maintenance_rows = _run_dependency_maintenance(
+                config,
+                tables,
+                logger,
+                run_dir,
+                dependency_pre_rows,
+                execute=args.execute,
+            )
+            dependency_post_rows = _write_dependency_report(config, tables, logger, run_dir, phase="post")
         dependency_rows = dependency_pre_rows + dependency_post_rows
         dependency_summary_rows = _write_dependency_summary(run_dir, dependency_rows, maintenance_rows)
         dependency_failed = _dependency_failed(config, dependency_rows + maintenance_rows)
@@ -929,7 +944,12 @@ def main(argv: list[str] | None = None) -> int:
         write_csv(run_dir / "pre_inventory_summary.csv", pre_audit_result.inventory_rows)
         write_csv(run_dir / "pre_column_diff.csv", pre_audit_result.column_diff_rows)
         write_csv(run_dir / "pre_type_mismatch.csv", pre_audit_result.type_mismatch_rows)
-        dependency_pre_rows = _write_dependency_report(config, tables, logger, run_dir, phase="pre")
+        skip_dependencies = bool(getattr(args, "skip_dependencies", False))
+        if skip_dependencies:
+            logger.info("Dependency reports skipped by --skip-dependencies")
+            dependency_pre_rows: list[dict] = []
+        else:
+            dependency_pre_rows = _write_dependency_report(config, tables, logger, run_dir, phase="pre")
         logger.info("Step 2/3 sync direction=%s", direction)
         sync_results = _sync_runner(config, logger, direction).sync_tables(
             tables,
@@ -953,15 +973,19 @@ def main(argv: list[str] | None = None) -> int:
                 checksum_rows,
                 sheet_name="checksum",
             )
-        maintenance_rows = _run_dependency_maintenance(
-            config,
-            tables,
-            logger,
-            run_dir,
-            dependency_pre_rows,
-            execute=args.execute,
-        )
-        dependency_post_rows = _write_dependency_report(config, tables, logger, run_dir, phase="post")
+        if skip_dependencies:
+            maintenance_rows: list[dict] = []
+            dependency_post_rows: list[dict] = []
+        else:
+            maintenance_rows = _run_dependency_maintenance(
+                config,
+                tables,
+                logger,
+                run_dir,
+                dependency_pre_rows,
+                execute=args.execute,
+            )
+            dependency_post_rows = _write_dependency_report(config, tables, logger, run_dir, phase="post")
         dependency_rows = dependency_pre_rows + dependency_post_rows
         dependency_summary_rows = _write_dependency_summary(run_dir, dependency_rows, maintenance_rows)
         dependency_failed = _dependency_failed(config, dependency_rows + maintenance_rows)

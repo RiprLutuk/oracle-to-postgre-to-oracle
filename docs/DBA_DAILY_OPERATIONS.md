@@ -106,10 +106,10 @@ Contoh manual dry-run:
 ops sync \
   --config config.yaml \
   --direction postgres-to-oracle \
-  --tables public.address \
+  --tables public.sample_customer \
   --mode upsert \
-  --key-columns address_id \
-  --incremental-column last_update \
+  --key-columns customer_id \
+  --incremental-column updated_at \
   --incremental
 ```
 
@@ -119,10 +119,10 @@ Execute:
 ops sync \
   --config config.yaml \
   --direction postgres-to-oracle \
-  --tables public.address \
+  --tables public.sample_customer \
   --mode upsert \
-  --key-columns address_id \
-  --incremental-column last_update \
+  --key-columns customer_id \
+  --incremental-column updated_at \
   --incremental \
   --go
 ```
@@ -130,8 +130,8 @@ ops sync \
 Post-sync verification:
 
 ```bash
-ops validate --config config.yaml --direction postgres-to-oracle --tables public.address
-ops validate missing-keys --config config.yaml --direction postgres-to-oracle --tables public.address
+ops validate --config config.yaml --direction postgres-to-oracle --tables public.sample_customer
+ops validate missing-keys --config config.yaml --direction postgres-to-oracle --tables public.sample_customer
 ops watermarks --config config.yaml
 ```
 
@@ -163,10 +163,10 @@ Incremental reverse:
 
 ```bash
 CONFIG_PATH=/path/to/config.yaml jobs/incremental.sh pg_to_oracle \
-  --tables public.address \
+  --tables public.sample_customer \
   --mode upsert \
-  --key-columns address_id \
-  --incremental-column last_update \
+  --key-columns customer_id \
+  --incremental-column updated_at \
   --incremental
 ```
 
@@ -425,7 +425,7 @@ sorted table list
 Contoh bentuk key:
 
 ```text
-oracle_to_pg_daily:sync:oracle-to-postgres:public.address,public.housemaster
+oracle_to_pg_daily:sync:oracle-to-postgres:public.sample_customer,public.sample_order
 ```
 
 ### Cek Circuit Breaker
@@ -438,7 +438,7 @@ Output:
 
 ```text
 job_key,failure_count,last_failure_at,cooldown_until,blocked,last_error
-oracle_to_pg_daily:sync:oracle-to-postgres:public.address,3,2026-04-30T10:10:00+00:00,2026-04-30T10:40:00+00:00,yes,rowcount mismatch
+oracle_to_pg_daily:sync:oracle-to-postgres:public.sample_customer,3,2026-04-30T10:10:00+00:00,2026-04-30T10:40:00+00:00,yes,rowcount mismatch
 ```
 
 Exit code:
@@ -451,7 +451,7 @@ Exit code:
 Reset satu job:
 
 ```bash
-ops circuit-breaker reset --table public.address --config config.yaml
+ops circuit-breaker reset --table public.sample_customer --config config.yaml
 ```
 
 Reset semua:
@@ -674,10 +674,10 @@ Contoh:
 ops sync \
   --config config.yaml \
   --direction postgres-to-oracle \
-  --tables public.address \
+  --tables public.sample_customer \
   --mode upsert \
-  --key-columns address_id \
-  --incremental-column last_update \
+  --key-columns customer_id \
+  --incremental-column updated_at \
   --incremental \
   --go
 ```
@@ -705,7 +705,7 @@ ops sync \
   --direction oracle-to-postgres \
   --tables public.table_name \
   --mode incremental_safe \
-  --incremental-column last_update \
+  --incremental-column updated_at \
   --incremental \
   --go
 ```
@@ -739,7 +739,7 @@ Sebelum pasang cron:
 ```bash
 ops doctor --config config.yaml
 ops sync --config config.yaml --profile daily --direction oracle-to-postgres
-ops sync --config config.yaml --profile every_5min --direction postgres-to-oracle --mode upsert --tables public.address --key-columns address_id --incremental-column last_update --incremental
+ops sync --config config.yaml --profile every_5min --direction postgres-to-oracle --mode upsert --tables public.sample_customer --key-columns customer_id --incremental-column updated_at --incremental
 ```
 
 Pastikan:
@@ -756,10 +756,80 @@ Contoh run manual wrapper:
 
 ```bash
 CONFIG_PATH=/path/to/config.yaml RETRY=3 TIMEOUT_SECONDS=7200 jobs/daily.sh oracle_to_pg
-CONFIG_PATH=/path/to/config.yaml RETRY=3 TIMEOUT_SECONDS=900 jobs/incremental.sh pg_to_oracle --tables public.address --mode upsert --key-columns address_id --incremental-column last_update --incremental
+CONFIG_PATH=/path/to/config.yaml RETRY=3 TIMEOUT_SECONDS=900 jobs/incremental.sh pg_to_oracle --tables public.sample_customer --mode upsert --key-columns customer_id --incremental-column updated_at --incremental
 ```
 
 Ingat: wrapper job menambahkan `--go`, jadi itu execute sungguhan.
+
+### Cron PostgreSQL -> Oracle Per Menit
+
+Untuk table operasional kecil/menengah yang harus reverse sync cepat, gunakan
+wrapper lokal `jobs/pg_to_oracle_every_1min.sh`. File ini sengaja masuk
+`.gitignore` karena isinya biasanya spesifik environment: daftar table,
+unique key, jumlah worker, timeout, dan pilihan dry-run.
+
+Dry-run manual dulu:
+
+```bash
+cd /home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit
+P2O_1MIN_DRY_RUN=1 \
+P2O_1MIN_WORKERS=6 \
+CONFIG_PATH=/home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit/config.yaml \
+PYTHON_BIN=/home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit/.venv/bin/python \
+jobs/pg_to_oracle_every_1min.sh
+```
+
+Execute manual setelah dry-run aman:
+
+```bash
+cd /home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit
+P2O_1MIN_DRY_RUN=0 \
+P2O_1MIN_WORKERS=6 \
+CONFIG_PATH=/home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit/config.yaml \
+PYTHON_BIN=/home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit/.venv/bin/python \
+jobs/pg_to_oracle_every_1min.sh
+```
+
+Contoh crontab production:
+
+```cron
+SHELL=/bin/bash
+* * * * * cd /home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit && P2O_1MIN_WORKERS=6 P2O_1MIN_DRY_RUN=0 jobs/pg_to_oracle_every_1min.sh
+```
+
+Wrapper sudah punya default untuk `CONFIG_PATH`, `PYTHON_BIN`, `LOG_DIR`,
+`LOCK_DIR`, `RETRY`, `TIMEOUT_SECONDS`, `LOG_ROTATE_BYTES`, dan
+`LOG_RETENTION_DAYS`, jadi cron cukup satu baris jika repo path dan `.venv`
+standar. Tambahkan env di crontab hanya kalau perlu override:
+
+```cron
+PYTHON_BIN=/custom/path/python
+TIMEOUT_SECONDS=900
+```
+
+Untuk uji cron tanpa write ke Oracle, set `P2O_1MIN_DRY_RUN=1` dulu di baris
+cron. Tidak perlu `source .venv/bin/activate` jika `PYTHON_BIN` sudah menunjuk
+ke `.venv/bin/python`.
+
+Pantau master log terpusat:
+
+```bash
+tail -f reports/job_logs/every_1min_pg_to_oracle.log
+```
+
+Cron tidak perlu redirect output ke file lain. Wrapper menangkap output detail
+dari job paralel, menulis satu ringkasan finish per table ke master log, dan
+menyimpan raw log hanya kalau table gagal. Jika perlu menyimpan raw log untuk
+semua table saat investigasi, jalankan dengan `P2O_1MIN_KEEP_RAW_LOGS=1`.
+Jika perlu melihat event start/retry per table, set `P2O_1MIN_LOG_STARTS=1`.
+Lokasi raw log default: `reports/job_logs/every_1min_pg_to_oracle_raw/`.
+
+Catatan penting:
+
+- table dengan kolom timestamp memakai watermark dan overlap
+- table tanpa kolom timestamp berjalan key-only tanpa `WHERE`
+- delete propagation tidak ikut di job ini; gunakan tombstone/CDC atau workflow
+  full mirror terpisah jika delete juga harus disamakan
 
 ## Escalation Rules
 

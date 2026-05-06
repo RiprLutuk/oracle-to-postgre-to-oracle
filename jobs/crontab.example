@@ -8,12 +8,16 @@ LOG_RETENTION_DAYS=14
 # Optional alert command. It receives ALERT_MESSAGE in the environment.
 # ALERT_COMMAND='printf "%s\n" "$ALERT_MESSAGE" | mail -s "oracle-pg-sync failed" dba@example.com'
 
-# Full dependency-safe refresh once per day in both directions.
+# Full dependency-safe Oracle -> PostgreSQL refresh once per day.
 15 1 * * * cd /home/app/oracle-pg-sync-audit && jobs/daily.sh oracle_to_pg
-45 1 * * * cd /home/app/oracle-pg-sync-audit && jobs/daily.sh pg_to_oracle
 
-# Incremental sync every five minutes in both directions.
+# PostgreSQL -> Oracle daily uses full replace by profile default. Enable only
+# with explicit table scope and app owner approval.
+# 45 1 * * * cd /home/app/oracle-pg-sync-audit && jobs/daily.sh pg_to_oracle --tables public.small_reference_table --mode truncate
+
+# Incremental sync every five minutes.
 */5 * * * * cd /home/app/oracle-pg-sync-audit && jobs/incremental.sh oracle_to_pg
-*/5 * * * * cd /home/app/oracle-pg-sync-audit && jobs/incremental.sh pg_to_oracle --tables public.address --mode upsert --key-columns address_id --incremental-column last_update
+*/5 * * * * cd /home/app/oracle-pg-sync-audit && jobs/incremental.sh pg_to_oracle --tables public.sample_customer --mode upsert --key-columns customer_id --incremental-column updated_at
 
-# Copy table-specific wrappers when reverse incremental filters differ by table.
+# Put table-specific or per-minute wrappers in local/private jobs and document
+# the exact table/key list in your production runbook.
