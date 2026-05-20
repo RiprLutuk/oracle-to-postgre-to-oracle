@@ -796,11 +796,10 @@ CONFIG_PATH=/path/to/config.yaml RETRY=3 TIMEOUT_SECONDS=900 jobs/incremental.sh
 
 Ingat: wrapper job menambahkan `--go`, jadi itu execute sungguhan.
 
-### Cron PostgreSQL -> Oracle Per Menit
+### Cron PostgreSQL -> Oracle Per 2 Menit
 
 Untuk table operasional kecil/menengah yang harus reverse sync cepat, gunakan
-wrapper lokal `jobs/pg_to_oracle_every_1min.sh`. File ini sengaja masuk
-`.gitignore` karena isinya biasanya spesifik environment: daftar table,
+wrapper lokal `jobs/pg_to_oracle_every_2min.sh`. File ini berisi daftar table,
 unique key, jumlah worker, timeout, dan pilihan dry-run.
 Di `TABLE_SPECS`, isi field ketiga dengan `auto` agar job mendeteksi kolom
 timestamp update/create otomatis; jika keduanya ada, filter memakai
@@ -810,29 +809,29 @@ Dry-run manual dulu:
 
 ```bash
 cd /home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit
-P2O_1MIN_DRY_RUN=1 \
-P2O_1MIN_WORKERS=6 \
+P2O_DRY_RUN=1 \
+P2O_WORKERS=6 \
 CONFIG_PATH=/home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit/config.yaml \
 PYTHON_BIN=/home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit/.venv/bin/python \
-jobs/pg_to_oracle_every_1min.sh
+jobs/pg_to_oracle_every_2min.sh
 ```
 
 Execute manual setelah dry-run aman:
 
 ```bash
 cd /home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit
-P2O_1MIN_DRY_RUN=0 \
-P2O_1MIN_WORKERS=6 \
+P2O_DRY_RUN=0 \
+P2O_WORKERS=6 \
 CONFIG_PATH=/home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit/config.yaml \
 PYTHON_BIN=/home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit/.venv/bin/python \
-jobs/pg_to_oracle_every_1min.sh
+jobs/pg_to_oracle_every_2min.sh
 ```
 
 Contoh crontab production:
 
 ```cron
 SHELL=/bin/bash
-* * * * * cd /home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit && P2O_1MIN_WORKERS=6 P2O_1MIN_DRY_RUN=0 jobs/pg_to_oracle_every_1min.sh
+*/2 * * * * cd /home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit && mkdir -p reports/job_logs/pg_to_oracle_2min && P2O_WORKERS=6 P2O_DRY_RUN=0 jobs/pg_to_oracle_every_2min.sh >> reports/job_logs/pg_to_oracle_2min/cron.log 2>&1
 ```
 
 Wrapper sudah punya default untuk `CONFIG_PATH`, `PYTHON_BIN`, `LOG_DIR`,
@@ -845,22 +844,22 @@ PYTHON_BIN=/custom/path/python
 TIMEOUT_SECONDS=900
 ```
 
-Untuk uji cron tanpa write ke Oracle, set `P2O_1MIN_DRY_RUN=1` dulu di baris
+Untuk uji cron tanpa write ke Oracle, set `P2O_DRY_RUN=1` dulu di baris
 cron. Tidak perlu `source .venv/bin/activate` jika `PYTHON_BIN` sudah menunjuk
 ke `.venv/bin/python`.
 
 Pantau master log terpusat:
 
 ```bash
-tail -f reports/job_logs/every_1min_pg_to_oracle.log
+tail -f reports/job_logs/pg_to_oracle_2min/pg_to_oracle_every_2min.log
 ```
 
 Cron tidak perlu redirect output ke file lain. Wrapper menangkap output detail
 dari job paralel, menulis satu ringkasan finish per table ke master log, dan
 menyimpan raw log hanya kalau table gagal. Jika perlu menyimpan raw log untuk
-semua table saat investigasi, jalankan dengan `P2O_1MIN_KEEP_RAW_LOGS=1`.
-Jika perlu melihat event start/retry per table, set `P2O_1MIN_LOG_STARTS=1`.
-Lokasi raw log default: `reports/job_logs/every_1min_pg_to_oracle_raw/`.
+semua table saat investigasi, jalankan dengan `P2O_KEEP_RAW_LOGS=1`.
+Jika perlu melihat event start/retry per table, set `P2O_LOG_STARTS=1`.
+Lokasi raw log default: `reports/job_logs/pg_to_oracle_2min/raw/`.
 
 Catatan penting:
 

@@ -37,6 +37,83 @@ class PostgresToOracleSyncTest(unittest.TestCase):
         self.assertIn('"updated_at" >= TIMESTAMP', where)
         self.assertIn("INTERVAL '5 minutes'", where)
 
+    def test_reverse_incremental_where_supports_restricted_coalesce_expression(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CheckpointStore(Path(tmp) / "checkpoint.sqlite3")
+            store.set_watermark(
+                direction="postgres_to_oracle",
+                table_name="public.sample",
+                strategy="updated_at",
+                column_name="coalesce(updated_date,created_date)",
+                value="2026-01-01T00:00:00",
+            )
+            sync = PostgresToOracleSync(AppConfig(oracle=OracleConfig(schema="APP"), postgres=PostgresConfig(schema="public")))
+            table_cfg = TableConfig(
+                name="public.sample",
+                incremental=IncrementalConfig(
+                    enabled=True,
+                    strategy="updated_at",
+                    column="coalesce(updated_date, created_date)",
+                    overlap_minutes=5,
+                ),
+            )
+            columns = [
+                ColumnMeta(name="updated_date", data_type="timestamp without time zone", ordinal=1),
+                ColumnMeta(name="created_date", data_type="timestamp without time zone", ordinal=2),
+            ]
+
+            source = sync._resolve_incremental_source(
+                table_cfg,
+                "public.sample",
+                columns,
+                incremental=True,
+                full_refresh=False,
+            )
+            where = sync._incremental_where(
+                store,
+                table_cfg,
+                "public.sample",
+                incremental_source=source,
+                incremental=True,
+                full_refresh=False,
+            )
+
+        self.assertEqual(source.expression, 'COALESCE("updated_date", "created_date")')
+        self.assertEqual(source.columns, ("updated_date", "created_date"))
+        self.assertIn('COALESCE("updated_date", "created_date") >= TIMESTAMP', where)
+
+    def test_reverse_incremental_expression_rejects_unassessed_sql(self):
+        sync = PostgresToOracleSync(AppConfig(oracle=OracleConfig(schema="APP"), postgres=PostgresConfig(schema="public")))
+        table_cfg = TableConfig(
+            name="public.sample",
+            incremental=IncrementalConfig(enabled=True, strategy="updated_at", column="updated_at + interval '1 day'"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "Unsupported incremental column expression"):
+            sync._resolve_incremental_source(
+                table_cfg,
+                "public.sample",
+                [ColumnMeta(name="updated_at", data_type="timestamp without time zone", ordinal=1)],
+                incremental=True,
+                full_refresh=False,
+            )
+
+    def test_reverse_incremental_expression_requires_existing_columns(self):
+        sync = PostgresToOracleSync(AppConfig(oracle=OracleConfig(schema="APP"), postgres=PostgresConfig(schema="public")))
+        table_cfg = TableConfig(
+            name="public.sample",
+            incremental=IncrementalConfig(enabled=True, strategy="updated_at", column="coalesce(updated_at,created_at)"),
+        )
+
+        with self.assertRaisesRegex(ValueError, "missing PostgreSQL column"):
+            sync._resolve_incremental_source(
+                table_cfg,
+                "public.sample",
+                [ColumnMeta(name="updated_at", data_type="timestamp without time zone", ordinal=1)],
+                incremental=True,
+                full_refresh=False,
+            )
+
     def test_reverse_checksum_summary_marks_mismatch(self):
         result = type(
             "Result",

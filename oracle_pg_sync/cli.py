@@ -228,6 +228,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Set PostgreSQL nextval at least this many values ahead of Oracle last_number",
     )
+    sequences.add_argument(
+        "--sequence-source",
+        choices=["tables", "oracle-list", "both"],
+        default="tables",
+        help="Choose PostgreSQL sequence candidates from table links, exact Oracle sequence names, or both",
+    )
     sequences.add_argument("--go", "--execute", dest="execute", action="store_true", help="Apply setval changes")
 
     all_cmd = sub.add_parser("all", help="Audit, sync, audit ulang, lalu report")
@@ -724,6 +730,7 @@ def main(argv: list[str] | None = None) -> int:
             logger,
             execute=bool(args.execute),
             sequence_buffer=sequence_buffer,
+            sequence_source=str(getattr(args, "sequence_source", "tables") or "tables"),
         )
         write_csv(run_dir / "sequence_sync.csv", rows)
         write_sequence_html_report(run_dir / "sequence_report.html", rows)
@@ -820,6 +827,11 @@ def main(argv: list[str] | None = None) -> int:
         dependency_rows = dependency_pre_rows + dependency_post_rows
         dependency_summary_rows = _write_dependency_summary(run_dir, dependency_rows, maintenance_rows)
         dependency_failed = _dependency_failed(config, dependency_rows + maintenance_rows)
+        if dependency_failed and os.getenv("ORACLE_PG_SYNC_DEPENDENCY_WARN_ONLY", "").lower() in {"1", "true", "yes"}:
+            logger.warning(
+                "Dependency validation has broken objects but is warn-only by ORACLE_PG_SYNC_DEPENDENCY_WARN_ONLY"
+            )
+            dependency_failed = False
         rollback_rows: list[dict] = []
         table_failed = any(row["status"] == "FAILED" for row in rows)
         run_failed = dependency_failed or table_failed

@@ -536,14 +536,13 @@ Examples:
 Per-minute local reverse wrapper example:
 
 ```bash
-P2O_1MIN_DRY_RUN=1 ./jobs/pg_to_oracle_every_1min.sh
-P2O_1MIN_DRY_RUN=0 ./jobs/pg_to_oracle_every_1min.sh
+P2O_DRY_RUN=1 ./jobs/pg_to_oracle_every_2min.sh
+P2O_DRY_RUN=0 ./jobs/pg_to_oracle_every_2min.sh
 ```
 
-`jobs/pg_to_oracle_every_1min.sh` is intentionally ignored by git because the
-table/key list is environment-specific. It writes one centralized summary log
-to `reports/job_logs/every_1min_pg_to_oracle.log`; raw per-table logs are kept
-only for failures unless `P2O_1MIN_KEEP_RAW_LOGS=1` is set. See
+`jobs/pg_to_oracle_every_2min.sh` writes one centralized summary log
+to `reports/job_logs/pg_to_oracle_2min/pg_to_oracle_every_2min.log`; raw per-table logs are kept
+only for failures unless `P2O_KEEP_RAW_LOGS=1` is set. See
 [`DBA_DAILY_OPERATIONS.md`](DBA_DAILY_OPERATIONS.md#cron-postgresql---oracle-per-menit)
 for a complete crontab example.
 

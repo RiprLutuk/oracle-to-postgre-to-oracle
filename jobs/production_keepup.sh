@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Keep this higher than the heaviest table refresh.
 export TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-14400}"
 export RETRY="${RETRY:-1}"
+export SEQUENCE_BUFFER="${SEQUENCE_BUFFER:-1000}"
 
 source "$SCRIPT_DIR/common.sh"
 
@@ -48,6 +49,8 @@ set +e
 timeout "$TIMEOUT_SECONDS" "$PYTHON_BIN" -m oracle_pg_sync.ops sync-sequences \
   --config "$CONFIG_PATH" \
   --go \
+  --sequence-source oracle-list \
+  --sequence-buffer "$SEQUENCE_BUFFER" \
   "${sequence_args[@]}" >> "$log_file" 2>&1
 sequence_status=$?
 set -e

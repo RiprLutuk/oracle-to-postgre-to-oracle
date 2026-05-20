@@ -19,6 +19,6 @@ LOG_RETENTION_DAYS=14
 */5 * * * * cd /home/app/oracle-pg-sync-audit && jobs/incremental.sh oracle_to_pg
 */5 * * * * cd /home/app/oracle-pg-sync-audit && jobs/incremental.sh pg_to_oracle --tables public.sample_customer --mode upsert --key-columns customer_id --incremental
 
-# Per-minute reverse wrapper can use TABLE_SPECS third field "auto" to detect
+# Per-2-minute reverse wrapper can use TABLE_SPECS third field "auto" to detect
 # update/create timestamp columns, including COALESCE(update_col, create_col).
-# * * * * * cd /home/app/oracle-pg-sync-audit && P2O_1MIN_DRY_RUN=0 jobs/pg_to_oracle_every_1min.sh
+# */2 * * * * cd /home/app/oracle-pg-sync-audit && mkdir -p reports/job_logs/pg_to_oracle_2min && P2O_DRY_RUN=0 jobs/pg_to_oracle_every_2min.sh >> reports/job_logs/pg_to_oracle_2min/cron.log 2>&1

@@ -14,9 +14,11 @@ SEQUENCE_FIELDS = [
     "dependency_kind",
     "oracle_sequence",
     "oracle_last_number",
+    "oracle_table_max_value",
     "sequence_buffer",
     "postgres_current_next",
     "table_max_value",
+    "postgres_sequence_max_value",
     "postgres_set_to",
     "oracle_pg_delta",
     "status",
@@ -97,7 +99,7 @@ def write_sequence_html_report(path: Path, rows: list[dict[str, Any]], *, title:
 <body>
   <h1>{escape(title)}</h1>
   {links_html}
-  <p class="muted">Compare Oracle sequence last number, optional buffer, PostgreSQL next value, table max value, and final setval target.</p>
+  <p class="muted">Compare Oracle sequence last number, Oracle table max value, optional buffer, PostgreSQL next value, PostgreSQL table max value, and final setval target.</p>
   <div class="toolbar">
     <input id="searchBox" type="search" placeholder="Search table/sequence" oninput="filterRows()">
     <select id="statusFilter" onchange="filterRows()">
@@ -142,7 +144,8 @@ def write_sequence_html_report(path: Path, rows: list[dict[str, Any]], *, title:
 
 def _display_row(row: dict[str, Any]) -> dict[str, Any]:
     display = {field: row.get(field, "") for field in SEQUENCE_FIELDS}
-    display["oracle_pg_delta"] = _delta(row.get("postgres_current_next"), row.get("oracle_last_number"))
+    oracle_baseline = row.get("oracle_table_max_value") or row.get("oracle_last_number")
+    display["oracle_pg_delta"] = _delta(row.get("postgres_current_next"), oracle_baseline)
     display["compare_status"] = _compare_status(row)
     return display
 
@@ -153,6 +156,7 @@ def _compare_status(row: dict[str, Any]) -> str:
         return "SKIPPED"
     pg_next = _int_or_none(row.get("postgres_current_next"))
     oracle_last = _int_or_none(row.get("oracle_last_number"))
+    oracle_table_max = _int_or_none(row.get("oracle_table_max_value"))
     sequence_buffer = _int_or_none(row.get("sequence_buffer")) or 0
     set_to = _int_or_none(row.get("postgres_set_to"))
     if pg_next is None or set_to is None:
@@ -165,7 +169,8 @@ def _compare_status(row: dict[str, Any]) -> str:
         if pg_next > set_to:
             return "PG_AHEAD"
         return "ALIGNED"
-    if oracle_last is not None and pg_next > oracle_last:
+    oracle_baseline = oracle_table_max if oracle_table_max is not None else oracle_last
+    if oracle_baseline is not None and pg_next > oracle_baseline:
         return "PG_AHEAD"
     return "ALIGNED"
 

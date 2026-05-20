@@ -34,6 +34,30 @@ class FakeCursor:
         return (self.result,)
 
 
+class FakeSelectCursor:
+    def __init__(self):
+        self.executed = []
+        self.result = []
+
+    def execute(self, query, params=None):
+        params = params or {}
+        self.executed.append((query, params))
+        if "FROM ALL_OBJECTS" in query and "OBJECT_TYPE" in query:
+            self.result = [("SAMPLE_TABLE",)]
+        elif "FROM ALL_TAB_COLUMNS" in query:
+            self.result = [("CODE",), ("FLAG",)]
+        else:
+            self.result = []
+
+    def fetchone(self):
+        if not self.result:
+            return None
+        return self.result[0]
+
+    def fetchall(self):
+        return self.result
+
+
 class OracleNameResolutionTest(unittest.TestCase):
     def test_resolve_table_name_falls_back_to_case_insensitive_lookup(self):
         cur = FakeCursor({"samplemixedcase": "SampleMixedCase"})
@@ -49,6 +73,11 @@ class OracleNameResolutionTest(unittest.TestCase):
         cur = FakeCursor({"SAMPLE_TABLE": "SAMPLE_TABLE", "sample_table": "Sample_Table"})
 
         self.assertEqual(oracle.resolve_table_name(cur, "SAMPLE_APP", "sample_table"), "SAMPLE_TABLE")
+
+    def test_char_column_names_returns_oracle_char_columns(self):
+        cur = FakeSelectCursor()
+
+        self.assertEqual(oracle.char_column_names(cur, "SAMPLE_APP", "sample_table"), {"CODE", "FLAG"})
 
 
 if __name__ == "__main__":

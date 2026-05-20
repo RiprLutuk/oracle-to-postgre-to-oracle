@@ -45,6 +45,7 @@ def copy_rows(
     key_columns: list[str] | None = None,
     skip_failed_rows: bool = False,
     failed_row_sample_limit: int = 20,
+    trim_columns: set[str] | None = None,
 ) -> int:
     copy_sql = sql.SQL("COPY {} ({}) FROM STDIN").format(
         table_ident(schema, table),
@@ -61,6 +62,7 @@ def copy_rows(
                     columns=columns,
                     lob_chunk_size_bytes=lob_chunk_size_bytes,
                     metrics=active_metrics,
+                    trim_columns={column.lower() for column in (trim_columns or set())},
                 )
                 copy.write_row(sanitized)
                 copied += 1
@@ -91,11 +93,15 @@ def _sanitize_row(
     columns: list[str],
     lob_chunk_size_bytes: int,
     metrics: CopyMetrics,
+    trim_columns: set[str] | None = None,
 ) -> list[Any]:
     sanitized = []
+    trim_columns = trim_columns or set()
     for idx, value in enumerate(row):
         column_name = columns[idx] if idx < len(columns) else f"column_{idx + 1}"
         try:
+            if isinstance(value, str) and column_name.lower() in trim_columns:
+                value = value.strip()
             sanitized.append(_sanitize_value(value, lob_chunk_size_bytes=lob_chunk_size_bytes, metrics=metrics))
         except Exception as exc:
             setattr(exc, "column_name", column_name)

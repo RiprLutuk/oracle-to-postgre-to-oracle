@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -425,6 +426,17 @@ class OracleToPostgresSync:
                         full_refresh=full_refresh,
                     )
                     effective_where = _combine_where(base_where, incremental_where)
+                    if (
+                        self.config.sync.require_incremental_filter
+                        and not full_refresh
+                        and mode in {"append", "delete", "incremental_safe"}
+                        and (incremental or table_cfg.incremental.enabled)
+                        and not effective_where
+                    ):
+                        raise ValueError(
+                            f"Incremental/WHERE filter missing for {table.fqname}; refusing no-WHERE Oracle scan. "
+                            "Set a watermark/--initial-value or disable --require-incremental-filter intentionally."
+                        )
                     result.effective_where = effective_where or ""
                     result.oracle_count_sql_summary = _oracle_count_sql_summary(owner, source_table, effective_where)
                     result.postgres_count_sql_summary = _postgres_count_sql_summary(table.schema, table.table)
@@ -1136,8 +1148,21 @@ class OracleToPostgresSync:
         chunk_key: str = "",
         key_columns: list[str] | None = None,
     ) -> int:
-        rows_cursor = oracle.select_rows(ocur, owner, source_table, mapping, where=where)
+        oracle_char_columns = oracle.char_column_names(ocur, owner, source_table)
+        rows_cursor = oracle.select_rows(
+            ocur,
+            owner,
+            source_table,
+            mapping,
+            where=where,
+            fetch_size=self.config.sync.batch_size,
+        )
         pg_columns = [pg_col for pg_col, _ in mapping]
+        trim_columns = {
+            pg_col
+            for pg_col, oracle_col in mapping
+            if oracle_col is not None and oracle.oracle_name(oracle_col) in oracle_char_columns
+        }
         return copy_rows(
             pcur,
             schema=source_schema,
@@ -1151,6 +1176,7 @@ class OracleToPostgresSync:
             key_columns=key_columns or [],
             skip_failed_rows=self.config.sync.skip_failed_rows,
             failed_row_sample_limit=self.config.sync.failed_row_sample_limit,
+            trim_columns=trim_columns,
         )
 
     def _copy_chunks(
@@ -1581,6 +1607,9 @@ class OracleToPostgresSync:
         target_table: str | None = None,
         force_enabled: bool = False,
     ) -> list[dict[str, Any]]:
+        if os.getenv("ORACLE_PG_SYNC_DISABLE_CHECKSUM", "").lower() in {"1", "true", "yes"}:
+            self.logger.info("Checksum validation disabled by ORACLE_PG_SYNC_DISABLE_CHECKSUM")
+            return []
         cfg = self.config.validation.checksum
         table_cfg = self.config.table_config(fq_table)
         if table_cfg and table_cfg.validation.checksum.enabled:
@@ -1612,7 +1641,13 @@ class OracleToPostgresSync:
         rows: list[dict[str, Any]] = []
         pg_table = target_table or split_schema_table(fq_table, self.config.postgres.schema).table
         for chunk in chunks:
-            source_cursor = oracle.select_rows(ocur, owner, source_table, mapped, where=_chunk_where(chunk))
+            source_cursor = oracle.select_rows(
+                ocur,
+                owner,
+                source_table,
+                mapped,
+                where=_chunk_where(chunk),
+            )
             target_cursor = postgres.select_rows(
                 pcur,
                 target_schema,

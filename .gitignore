@@ -40,3 +40,6 @@ vendor/oracle/*.zip
 vendor/oracle/META-INF/
 vendor/oracle/instantclient_*/
 queries/
+jobs/reference_*.sh
+jobs/pg_to_oracle_every_2min.sh
+reports/

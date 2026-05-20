@@ -253,11 +253,11 @@ ops rollback <run_id> --config config.yaml
 - Untuk job incremental reverse, selalu isi `--mode upsert`, `--key-columns`, dan `--incremental-column`.
 - Ingat: job wrapper menambahkan `--go`, jadi cron berarti execute sungguhan.
 
-Contoh cron reverse PostgreSQL -> Oracle per menit ada di
-[DBA Daily Operations Guide](DBA_DAILY_OPERATIONS.md#cron-postgresql---oracle-per-menit).
-Uji dulu dengan `P2O_1MIN_DRY_RUN=1`; setelah aman baru ganti ke
-`P2O_1MIN_DRY_RUN=0`. Wrapper lokal `jobs/pg_to_oracle_every_1min.sh`
-sengaja di-ignore dari git karena daftar table/key biasanya beda per server.
+Contoh cron reverse PostgreSQL -> Oracle per 2 menit ada di
+[DBA Daily Operations Guide](DBA_DAILY_OPERATIONS.md#cron-postgresql---oracle-per-2-menit).
+Uji dulu dengan `P2O_DRY_RUN=1`; setelah aman baru ganti ke
+`P2O_DRY_RUN=0`. Wrapper lokal `jobs/pg_to_oracle_every_2min.sh`
+berisi daftar table/key yang sudah di-assess untuk server ini.
 
 ## Catatan PostgreSQL ke Oracle
 

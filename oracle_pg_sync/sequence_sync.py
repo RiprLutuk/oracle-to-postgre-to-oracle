@@ -32,36 +32,71 @@ def sync_postgres_sequences_from_oracle(
     *,
     execute: bool = False,
     sequence_buffer: int = 0,
+    sequence_source: str = "tables",
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     with oracle.connect(config.oracle) as ocon, postgres.connect(config.postgres, autocommit=True) as pcon:
         with ocon.cursor() as ocur, pcon.cursor() as pcur:
             oracle_sequences = _oracle_sequences(ocur, config.oracle.schema)
-            for table_name in tables:
-                table_cfg = config.table_config(table_name) or TableConfig(name=table_name)
-                target = split_schema_table(table_cfg.name, config.postgres.schema)
-                pg_schema = table_cfg.target_schema or target.schema
-                pg_table = table_cfg.target_table or target.table
-                oracle_schema = table_cfg.source_schema or config.oracle.schema
-                oracle_table = table_cfg.source_table or target.table
-                candidates = _postgres_sequence_candidates(pcur, pg_schema, pg_table)
-                if not candidates:
-                    rows.append(
-                        _row(
-                            table_name=f"{pg_schema}.{pg_table}",
-                            status="SKIPPED",
-                            message="no PostgreSQL serial/identity/name-match sequence found",
+            source = (sequence_source or "tables").lower().replace("_", "-")
+            if source not in {"tables", "oracle-list", "both"}:
+                raise ValueError(f"unsupported sequence_source: {sequence_source}")
+            seen: set[tuple[str, str]] = set()
+            if source in {"tables", "both"}:
+                for table_name in tables:
+                    table_cfg = config.table_config(table_name) or TableConfig(name=table_name)
+                    target = split_schema_table(table_cfg.name, config.postgres.schema)
+                    pg_schema = table_cfg.target_schema or target.schema
+                    pg_table = table_cfg.target_table or target.table
+                    oracle_schema = table_cfg.source_schema or config.oracle.schema
+                    oracle_table = table_cfg.source_table or target.table
+                    candidates = _postgres_sequence_candidates(pcur, pg_schema, pg_table)
+                    if not candidates:
+                        rows.append(
+                            _row(
+                                table_name=f"{pg_schema}.{pg_table}",
+                                status="SKIPPED",
+                                message="no PostgreSQL serial/identity/name-match sequence found",
+                            )
                         )
-                    )
-                    continue
+                        continue
+                    for candidate in candidates:
+                        key = (candidate.schema, candidate.name)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        rows.append(
+                            _sync_one_sequence(
+                                ocur,
+                                pcur,
+                                candidate,
+                                oracle_sequences,
+                                oracle_schema=oracle_schema,
+                                oracle_table=oracle_table,
+                                logger=logger,
+                                execute=execute,
+                                sequence_buffer=sequence_buffer,
+                            )
+                        )
+            if source in {"oracle-list", "both"}:
+                candidates = _postgres_oracle_name_sequence_candidates(
+                    pcur,
+                    config.postgres.schema,
+                    oracle_sequences,
+                )
                 for candidate in candidates:
+                    key = (candidate.schema, candidate.name)
+                    if key in seen:
+                        continue
+                    seen.add(key)
                     rows.append(
                         _sync_one_sequence(
+                            ocur,
                             pcur,
                             candidate,
                             oracle_sequences,
-                            oracle_schema=oracle_schema,
-                            oracle_table=oracle_table,
+                            oracle_schema=config.oracle.schema,
+                            oracle_table="",
                             logger=logger,
                             execute=execute,
                             sequence_buffer=sequence_buffer,
@@ -71,6 +106,7 @@ def sync_postgres_sequences_from_oracle(
 
 
 def _sync_one_sequence(
+    ocur: Any,
     pcur: Any,
     candidate: PostgresSequenceCandidate,
     oracle_sequences: dict[str, dict[str, Any]],
@@ -82,7 +118,7 @@ def _sync_one_sequence(
     sequence_buffer: int,
 ) -> dict[str, Any]:
     oracle_seq = _match_oracle_sequence(candidate, oracle_sequences, oracle_table)
-    table_fqname = f"{candidate.table_schema}.{candidate.table_name}"
+    table_fqname = f"{candidate.table_schema}.{candidate.table_name}" if candidate.table_name else ""
     if not oracle_seq:
         return _row(
             table_name=table_fqname,
@@ -94,32 +130,47 @@ def _sync_one_sequence(
         )
 
     pg_info = _postgres_sequence_info(pcur, candidate.schema, candidate.name)
-    table_max = _table_max_value(pcur, candidate.table_schema, candidate.table_name, candidate.column_name)
+    postgres_table_max = _table_max_value(pcur, candidate.table_schema, candidate.table_name, candidate.column_name)
+    oracle_table_max = _oracle_table_max_value(
+        ocur,
+        oracle_schema=oracle_schema,
+        oracle_table=oracle_table,
+        oracle_column=candidate.column_name,
+    )
     pg_increment = int(pg_info.get("increment_by") or 1)
     oracle_last = int(oracle_seq["last_number"])
     postgres_current_next = _postgres_current_next(pg_info, pg_increment)
     desired_next = _desired_next_value(
         oracle_last=oracle_last,
-        table_max=table_max,
+        oracle_table_max=oracle_table_max,
+        postgres_table_max=postgres_table_max,
         postgres_current_next=postgres_current_next,
         increment=pg_increment,
         sequence_buffer=sequence_buffer,
     )
+    max_value = pg_info.get("max_value")
+    if max_value is not None and desired_next > int(max_value):
+        desired_next = int(max_value)
     status = "DRY_RUN"
     message = ""
+    if max_value is not None and desired_next == int(max_value):
+        message = f"target capped at PostgreSQL sequence max_value={max_value}"
     if execute:
         _set_postgres_sequence(pcur, candidate.schema, candidate.name, desired_next)
         status = "SET"
         message = f"set PostgreSQL nextval to {desired_next}"
         logger.info(
-            "Sequence set %s oracle=%s.%s oracle_last=%s buffer=%s table_max=%s pg_current_next=%s set_to=%s",
+            "Sequence set %s oracle=%s.%s oracle_last=%s buffer=%s oracle_table_max=%s "
+            "postgres_table_max=%s pg_current_next=%s max_value=%s set_to=%s",
             candidate.fqname,
             oracle_schema,
             oracle_seq["sequence_name"],
             oracle_last,
             sequence_buffer,
-            table_max,
+            oracle_table_max,
+            postgres_table_max,
             postgres_current_next,
+            max_value,
             desired_next,
         )
 
@@ -130,9 +181,11 @@ def _sync_one_sequence(
         dependency_kind=candidate.dependency_kind,
         oracle_sequence=f"{oracle_schema}.{oracle_seq['sequence_name']}",
         oracle_last_number=oracle_last,
+        oracle_table_max_value=oracle_table_max,
         sequence_buffer=sequence_buffer,
         postgres_current_next=postgres_current_next,
-        table_max_value=table_max,
+        table_max_value=postgres_table_max,
+        postgres_sequence_max_value=max_value,
         postgres_set_to=desired_next,
         status=status,
         message=message,
@@ -222,6 +275,70 @@ def _postgres_sequence_candidates(cur: Any, schema: str, table: str) -> list[Pos
                 dependency_kind="name_match",
             )
         )
+    cur.execute(
+        """
+        SELECT DISTINCT seq_ns.nspname, seq.relname, att.attname
+        FROM pg_class seq
+        JOIN pg_namespace seq_ns ON seq_ns.oid = seq.relnamespace
+        JOIN pg_attrdef def ON pg_get_expr(def.adbin, def.adrelid) LIKE '%%' || quote_ident(seq_ns.nspname) || '.' || quote_ident(seq.relname) || '%%'
+            OR pg_get_expr(def.adbin, def.adrelid) LIKE '%%' || quote_ident(seq.relname) || '%%'
+        JOIN pg_class tbl ON tbl.oid = def.adrelid
+        JOIN pg_namespace tbl_ns ON tbl_ns.oid = tbl.relnamespace
+        JOIN pg_attribute att ON att.attrelid = tbl.oid AND att.attnum = def.adnum
+        WHERE seq.relkind = 'S'
+          AND seq_ns.nspname = %s
+          AND tbl_ns.nspname = %s
+          AND tbl.relname = %s
+        ORDER BY seq_ns.nspname, seq.relname, att.attname
+        """,
+        (schema, schema, table),
+    )
+    for seq_schema, seq_name, column_name in cur.fetchall():
+        key = (str(seq_schema), str(seq_name))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            PostgresSequenceCandidate(
+                schema=str(seq_schema),
+                name=str(seq_name),
+                table_schema=schema,
+                table_name=table,
+                column_name=str(column_name),
+                dependency_kind="default_expr",
+            )
+        )
+    return candidates
+
+
+def _postgres_oracle_name_sequence_candidates(
+    cur: Any,
+    schema: str,
+    oracle_sequences: dict[str, dict[str, Any]],
+) -> list[PostgresSequenceCandidate]:
+    candidates: list[PostgresSequenceCandidate] = []
+    cur.execute(
+        """
+        SELECT schemaname, sequencename
+        FROM pg_sequences
+        WHERE schemaname = %s
+        ORDER BY schemaname, sequencename
+        """,
+        (schema,),
+    )
+    for seq_schema, seq_name in cur.fetchall():
+        if str(seq_name).upper() not in oracle_sequences:
+            continue
+        candidates.append(
+            PostgresSequenceCandidate(
+                schema=str(seq_schema),
+                name=str(seq_name),
+                table_schema="",
+                table_name="",
+                column_name="",
+                dependency_kind="oracle_sequence_name",
+            )
+        )
     return candidates
 
 
@@ -234,6 +351,8 @@ def _match_oracle_sequence(
     if exact:
         return exact
     table_token = oracle_table.upper()
+    if not table_token:
+        return None
     matches = [row for name, row in oracle_sequences.items() if table_token in name]
     if len(matches) == 1:
         return matches[0]
@@ -243,7 +362,7 @@ def _match_oracle_sequence(
 def _postgres_sequence_info(cur: Any, schema: str, sequence: str) -> dict[str, Any]:
     cur.execute(
         """
-        SELECT schemaname, sequencename, increment_by, last_value
+        SELECT schemaname, sequencename, increment_by, last_value, max_value
         FROM pg_sequences
         WHERE schemaname = %s AND sequencename = %s
         """,
@@ -257,6 +376,7 @@ def _postgres_sequence_info(cur: Any, schema: str, sequence: str) -> dict[str, A
         "schema": row[0],
         "sequence": row[1],
         "increment_by": row[2],
+        "max_value": int(row[4]) if row[4] is not None else None,
         "last_value": last_value,
         "is_called": is_called,
     }
@@ -292,10 +412,47 @@ def _table_max_value(cur: Any, schema: str, table: str, column: str) -> int | No
     return int(row[0])
 
 
+def _oracle_table_max_value(
+    cur: Any,
+    *,
+    oracle_schema: str,
+    oracle_table: str,
+    oracle_column: str,
+) -> int | None:
+    if not oracle_column:
+        return None
+    cur.execute(
+        """
+        SELECT column_name
+        FROM all_tab_columns
+        WHERE owner = :owner
+          AND table_name = :table_name
+          AND UPPER(column_name) = :column_name
+        """,
+        {
+            "owner": oracle_schema.upper(),
+            "table_name": oracle_table.upper(),
+            "column_name": oracle_column.upper(),
+        },
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    column_name = str(row[0]).replace('"', '""')
+    schema_name = oracle_schema.upper().replace('"', '""')
+    table_name = oracle_table.upper().replace('"', '""')
+    cur.execute(f'SELECT MAX("{column_name}") FROM "{schema_name}"."{table_name}"')
+    max_row = cur.fetchone()
+    if not max_row or max_row[0] is None:
+        return None
+    return int(max_row[0])
+
+
 def _desired_next_value(
     *,
     oracle_last: int,
-    table_max: int | None,
+    oracle_table_max: int | None,
+    postgres_table_max: int | None,
     postgres_current_next: int | None,
     increment: int,
     sequence_buffer: int = 0,
@@ -303,9 +460,12 @@ def _desired_next_value(
     candidates = [oracle_last + max(int(sequence_buffer or 0), 0)]
     if postgres_current_next is not None:
         candidates.append(postgres_current_next)
-    if table_max is not None:
+    if oracle_table_max is not None:
         step = abs(int(increment or 1))
-        candidates.append(table_max + step)
+        candidates.append(oracle_table_max + step)
+    if postgres_table_max is not None:
+        step = abs(int(increment or 1))
+        candidates.append(postgres_table_max + step)
     return max(candidates)
 
 
@@ -338,9 +498,11 @@ def _row(**values: Any) -> dict[str, Any]:
         "dependency_kind",
         "oracle_sequence",
         "oracle_last_number",
+        "oracle_table_max_value",
         "sequence_buffer",
         "postgres_current_next",
         "table_max_value",
+        "postgres_sequence_max_value",
         "postgres_set_to",
         "status",
         "message",

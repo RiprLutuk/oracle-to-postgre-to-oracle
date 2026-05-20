@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -661,8 +662,7 @@ class PostgresToOracleSync:
         if full_refresh or not (incremental or cfg.enabled):
             return None
         if cfg.column:
-            column = str(cfg.column).lower()
-            return IncrementalSource(expression=_pg_qident(column), watermark_key=column, columns=(column,))
+            return _explicit_incremental_source(table_name, str(cfg.column), pg_columns)
         if cfg.strategy != "updated_at":
             raise ValueError(f"Incremental enabled for {table_name} but incremental.column is empty")
         source = _detect_incremental_source(pg_columns)
@@ -679,13 +679,15 @@ class PostgresToOracleSync:
         table_cfg: TableConfig,
         table_name: str,
         *,
-        incremental_source: IncrementalSource | None,
+        incremental_source: IncrementalSource | None = None,
         incremental: bool,
         full_refresh: bool,
     ) -> str | None:
         cfg = table_cfg.incremental
         if full_refresh or not (incremental or cfg.enabled):
             return None
+        if not incremental_source and cfg.column:
+            incremental_source = _explicit_incremental_source(table_name, str(cfg.column), ())
         if not incremental_source:
             raise ValueError(f"Incremental enabled for {table_name} but incremental.column is empty")
         value = checkpoint_store.get_watermark(
@@ -891,6 +893,59 @@ def _detect_incremental_source(columns: list[Any]) -> IncrementalSource | None:
     if create_col:
         return IncrementalSource(expression=_pg_qident(create_col), watermark_key=create_col, columns=(create_col,), detected=True)
     return None
+
+
+_COALESCE_INCREMENTAL_RE = re.compile(
+    r"^coalesce\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*,\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)$",
+    re.IGNORECASE,
+)
+
+
+def _explicit_incremental_source(
+    table_name: str,
+    value: str,
+    pg_columns: tuple[Any, ...] | list[Any],
+) -> IncrementalSource:
+    raw = value.strip()
+    if not raw:
+        raise ValueError(f"Incremental enabled for {table_name} but incremental.column is empty")
+    available = _column_name_set(pg_columns)
+    match = _COALESCE_INCREMENTAL_RE.match(raw)
+    if match:
+        left, right = (part.lower() for part in match.groups())
+        _require_pg_columns(table_name, available, (left, right))
+        return IncrementalSource(
+            expression=f"COALESCE({_pg_qident(left)}, {_pg_qident(right)})",
+            watermark_key=f"coalesce({left},{right})",
+            columns=(left, right),
+        )
+    if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", raw):
+        raise ValueError(
+            f"Unsupported incremental column expression for {table_name}: {value}. "
+            "Only plain column names or coalesce(column_a,column_b) are allowed."
+        )
+    column = raw.lower()
+    _require_pg_columns(table_name, available, (column,))
+    return IncrementalSource(expression=_pg_qident(column), watermark_key=column, columns=(column,))
+
+
+def _column_name_set(columns: tuple[Any, ...] | list[Any]) -> set[str]:
+    names: set[str] = set()
+    for column in columns:
+        name = str(getattr(column, "normalized_name", "") or getattr(column, "name", "") or "").lower()
+        if name:
+            names.add(name)
+    return names
+
+
+def _require_pg_columns(table_name: str, available: set[str], wanted: tuple[str, ...]) -> None:
+    if not available:
+        return
+    missing = [column for column in wanted if column not in available]
+    if missing:
+        raise ValueError(
+            f"Incremental column for {table_name} references missing PostgreSQL column(s): {', '.join(missing)}"
+        )
 
 
 def _best_incremental_column(columns: list[Any], *, kind: str) -> str | None:

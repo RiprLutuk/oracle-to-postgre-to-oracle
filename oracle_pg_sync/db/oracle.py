@@ -786,7 +786,13 @@ def select_rows(
     columns: list[tuple[str, str | None]],
     where: str | None = None,
     order_by: list[str] | None = None,
+    fetch_size: int | None = None,
 ):
+    if fetch_size:
+        size = max(1, int(fetch_size))
+        cur.arraysize = size
+        if hasattr(cur, "prefetchrows"):
+            cur.prefetchrows = size
     select_items = []
     for pg_column, oracle_column in columns:
         if oracle_column is None:
@@ -801,6 +807,21 @@ def select_rows(
         query += " ORDER BY " + ", ".join(qident(column.upper()) for column in order_by)
     cur.execute(query)
     return cur
+
+
+def char_column_names(cur, owner: str, table: str) -> set[str]:
+    table_name = resolve_table_or_view_name(cur, owner, table) or oracle_name(table)
+    cur.execute(
+        """
+        SELECT COLUMN_NAME
+        FROM ALL_TAB_COLUMNS
+        WHERE OWNER = :owner
+          AND TABLE_NAME = :tbl
+          AND DATA_TYPE IN ('CHAR', 'NCHAR')
+        """,
+        {"owner": owner.upper(), "tbl": table_name},
+    )
+    return {str(row[0]).upper() for row in cur.fetchall()}
 
 
 def insert_rows(

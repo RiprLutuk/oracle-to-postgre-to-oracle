@@ -19,10 +19,23 @@ from oracle_pg_sync.lob import (
     target_type_for_lob,
 )
 from oracle_pg_sync.metadata.type_mapping import ColumnMeta
-from oracle_pg_sync.sync.copy_loader import _sanitize_value
+from oracle_pg_sync.sync.copy_loader import CopyMetrics, _sanitize_row, _sanitize_value
 
 
 class LobStrategyTest(unittest.TestCase):
+    def test_sanitize_row_trims_configured_char_columns_to_empty_string(self):
+        row = ("ABC   ", "   ", "keep   ")
+
+        sanitized = _sanitize_row(
+            row,
+            columns=["code", "blank_code", "name"],
+            lob_chunk_size_bytes=1024,
+            metrics=CopyMetrics(),
+            trim_columns={"code", "blank_code"},
+        )
+
+        self.assertEqual(sanitized, ["ABC", "", "keep   "])
+
     def test_default_error_fails_for_lob(self):
         config = AppConfig(
             oracle=OracleConfig(schema="APP"),

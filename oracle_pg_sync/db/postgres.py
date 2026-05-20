@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -926,6 +927,8 @@ def analyze_table(cur, schema: str, table: str) -> None:
 
 
 def set_local_timeouts(cur, *, lock_timeout: str | None = None, statement_timeout: str | None = None) -> None:
+    lock_timeout = os.getenv("ORACLE_PG_SYNC_PG_LOCK_TIMEOUT") or lock_timeout
+    statement_timeout = os.getenv("ORACLE_PG_SYNC_PG_STATEMENT_TIMEOUT") or statement_timeout
     if lock_timeout:
         cur.execute(sql.SQL("SET LOCAL lock_timeout = {}").format(sql.Literal(lock_timeout)))
     if statement_timeout:
