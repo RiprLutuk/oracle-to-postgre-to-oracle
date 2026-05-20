@@ -841,7 +841,12 @@ def _clean_value(value: Any) -> Any:
     if isinstance(value, bytearray):
         return bytes(value)
     if isinstance(value, str):
-        return value.replace("\x00", "")
+        cleaned = value.replace("\x00", "")
+        # Oracle treats an empty string as NULL. Preserve the user's "blank"
+        # value as one space so NOT NULL text columns do not reject P2O rows.
+        if cleaned.strip() == "":
+            return " "
+        return cleaned
     return value
 
 

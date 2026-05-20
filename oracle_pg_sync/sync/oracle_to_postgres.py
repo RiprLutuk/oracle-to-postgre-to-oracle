@@ -1982,7 +1982,35 @@ class OracleToPostgresSync:
         candidates = postgres.list_matching_tables(pcur, schema, f"{table}__backup_%")
         if len(candidates) <= keep:
             return
-        postgres.drop_tables(pcur, schema, candidates[keep:])
+        drop_candidates: list[str] = []
+        for candidate in candidates[keep:]:
+            if self._table_has_dependents(pcur, schema, candidate):
+                self.logger.warning(
+                    "Skip backup cleanup for %s.%s because dependent objects still exist",
+                    schema,
+                    candidate,
+                )
+                continue
+            drop_candidates.append(candidate)
+        if drop_candidates:
+            postgres.drop_tables(pcur, schema, drop_candidates)
+
+    def _table_has_dependents(self, pcur, schema: str, table: str) -> bool:
+        pcur.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_depend d
+                JOIN pg_class ref ON ref.oid = d.refobjid
+                JOIN pg_namespace n ON n.oid = ref.relnamespace
+                WHERE n.nspname = %s
+                  AND ref.relname = %s
+                  AND d.deptype = 'n'
+            )
+            """,
+            (schema, table),
+        )
+        return bool(pcur.fetchone()[0])
 
     def _cleanup_staging_retention(self, pcur, schema: str, table: str) -> None:
         keep = max(0, int(self.config.sync.staging_retention_count or 0))

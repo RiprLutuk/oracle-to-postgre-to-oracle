@@ -7,10 +7,21 @@ from oracle_pg_sync.checkpoint import CheckpointStore, Chunk
 from oracle_pg_sync.config import AppConfig, IncrementalConfig, OracleConfig, PostgresConfig, TableConfig
 from oracle_pg_sync.db import oracle
 from oracle_pg_sync.metadata.type_mapping import ColumnMeta
-from oracle_pg_sync.sync.postgres_to_oracle import PostgresToOracleSync, ReverseSyncResult, _apply_checksum_summary
+from oracle_pg_sync.sync.postgres_to_oracle import (
+    PostgresToOracleSync,
+    ReverseSyncResult,
+    _apply_checksum_summary,
+    _clean_value,
+)
 
 
 class PostgresToOracleSyncTest(unittest.TestCase):
+    def test_clean_value_preserves_blank_text_as_space_for_oracle(self):
+        self.assertEqual(_clean_value(""), " ")
+        self.assertEqual(_clean_value("   "), " ")
+        self.assertEqual(_clean_value("\x00"), " ")
+        self.assertEqual(_clean_value("ABC"), "ABC")
+
     def test_reverse_incremental_where_uses_watermark(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CheckpointStore(Path(tmp) / "checkpoint.sqlite3")
