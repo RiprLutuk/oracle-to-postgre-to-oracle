@@ -5,6 +5,7 @@ import os
 import time
 import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1561,6 +1562,16 @@ class OracleToPostgresSync:
         if cfg.strategy == "numeric_key":
             return f"{column} > {value}"
         if cfg.strategy == "updated_at":
+            if isinstance(value, datetime):
+                value = value.strftime("%Y-%m-%dT%H:%M:%S")
+            elif isinstance(value, date):
+                value = datetime(value.year, value.month, value.day).strftime("%Y-%m-%dT%H:%M:%S")
+            else:
+                value = str(value).strip()
+                if "T" not in value and " " in value:
+                    value = value.replace(" ", "T", 1)
+                value = value.split(".", 1)[0]
+            value = value.replace("'", "''")
             return f"{column} >= TO_TIMESTAMP('{value}', 'YYYY-MM-DD\"T\"HH24:MI:SS') - INTERVAL '{int(cfg.overlap_minutes or 0)}' MINUTE"
         raise ValueError(f"Unsupported incremental strategy: {cfg.strategy}")
 
