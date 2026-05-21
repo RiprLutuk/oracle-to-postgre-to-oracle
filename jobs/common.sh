@@ -10,7 +10,9 @@ ALERT_COMMAND="${ALERT_COMMAND:-}"
 RETRY="${RETRY:-3}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-3600}"
 LOG_ROTATE_BYTES="${LOG_ROTATE_BYTES:-10485760}"
-LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-14}"
+LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-4}"
+RAW_LOG_RETENTION_DAYS="${RAW_LOG_RETENTION_DAYS:-2}"
+RAW_LOG_KEEP_LAST="${RAW_LOG_KEEP_LAST:-100}"
 
 require_positive_int() {
   local name="$1"
@@ -34,6 +36,8 @@ require_positive_int RETRY "$RETRY"
 require_positive_int TIMEOUT_SECONDS "$TIMEOUT_SECONDS"
 require_positive_int LOG_ROTATE_BYTES "$LOG_ROTATE_BYTES"
 require_non_negative_int LOG_RETENTION_DAYS "$LOG_RETENTION_DAYS"
+require_non_negative_int RAW_LOG_RETENTION_DAYS "$RAW_LOG_RETENTION_DAYS"
+require_non_negative_int RAW_LOG_KEEP_LAST "$RAW_LOG_KEEP_LAST"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   PYTHON_BIN="python"
@@ -235,6 +239,13 @@ rotate_job_log() {
 
 cleanup_old_logs() {
   find "$LOG_DIR" -type f -name '*.log.*' -mtime +"$LOG_RETENTION_DAYS" -delete 2>/dev/null || true
+  find "$LOG_DIR" -path '*/raw/*.log' -type f -mtime +"$RAW_LOG_RETENTION_DAYS" -delete 2>/dev/null || true
+  if [[ "$RAW_LOG_KEEP_LAST" -gt 0 ]]; then
+    find "$LOG_DIR" -path '*/raw/*.log' -type f -printf '%T@ %p\n' 2>/dev/null \
+      | sort -rn \
+      | awk -v keep="$RAW_LOG_KEEP_LAST" 'NR > keep { $1=""; sub(/^ /, ""); print }' \
+      | xargs -r rm -f --
+  fi
 }
 
 send_alert() {
