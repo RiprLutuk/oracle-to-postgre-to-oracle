@@ -31,14 +31,14 @@ Oracle download pages and install docs:
 If `curl` or `wget` is not installed, use Python:
 
 ```bash
-cd /home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit
+cd /path/to/oracle-pg-sync-audit
 python3 -c "import urllib.request, pathlib; pathlib.Path('vendor/oracle').mkdir(parents=True, exist_ok=True); urllib.request.urlretrieve('https://download.oracle.com/otn_software/linux/instantclient/instantclient-basic-linuxx64.zip', 'vendor/oracle/instantclient-basic-linuxx64.zip')"
 ```
 
 Extract it:
 
 ```bash
-cd /home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit
+cd /path/to/oracle-pg-sync-audit
 python3 -c "import zipfile; zipfile.ZipFile('vendor/oracle/instantclient-basic-linuxx64.zip').extractall('vendor/oracle')"
 ```
 

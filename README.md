@@ -155,6 +155,22 @@ Panduan langkah demi langkah ada di [Panduan Operator Awam](docs/OPERATOR_QUICK_
 Entry point `python -m ...` tetap tersedia untuk debugging dan development;
 contohnya dipindahkan ke [Developer Guide](docs/DEVELOPER_GUIDE.md).
 
+## Production Wrappers
+
+Tracked wrapper bawaan repo ada di `jobs/daily.sh`, `jobs/incremental.sh`,
+`jobs/every_5min.sh`, `jobs/production_keepup.sh`, dan
+`jobs/production_cutoff.sh`.
+
+Gunakan `production_cutoff.sh` hanya saat approved freeze window:
+
+```bash
+FREEZE_CONFIRMED=yes TIMEOUT_SECONDS=21600 jobs/production_cutoff.sh oracle_to_pg
+```
+
+Wrapper site-specific yang berisi nama table production, key business, schedule
+khusus, atau logic operasional internal sebaiknya tetap berada di file yang
+di-ignore dan didokumentasikan di runbook private, bukan di README public.
+
 ## Output Report
 
 Setiap eksekusi membuat satu folder run yang lengkap:
@@ -238,7 +254,9 @@ eksplisit di cron.
 - Sync membuat dependency report sebelum dan sesudah load: `dependency_pre.csv` dan `dependency_post.csv`.
 - Dependency health diringkas di `dependency_summary.csv`, manifest, Excel, dan HTML.
 - Saat execute, toolkit mencoba Oracle invalid object compile dan PostgreSQL MV refresh/validation.
-- Scheduler pack tersedia di `jobs/daily.sh` dan `jobs/every_5min.sh`; keduanya memakai `--profile`, lock file, dan log rotation.
+- Scheduler pack tersedia di `jobs/daily.sh`, `jobs/incremental.sh`, dan
+  `jobs/every_5min.sh`; wrapper memakai profile, lock file, retry, timeout, dan
+  log rotation.
 - Cron template tersedia di `jobs/crontab.example`. Set `ALERT_COMMAND` untuk menerima alert saat job keluar non-zero.
 - Default `parallel_workers: 1`, `fast_count: true`, dan `exact_count_after_load: false` supaya tidak terlalu berat di client/server.
 - PostgreSQL `pg_lock_timeout: 5s` membuat sync gagal cepat jika table sedang terkunci, bukan menunggu lock lama.

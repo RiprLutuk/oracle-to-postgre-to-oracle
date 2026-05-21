@@ -29,6 +29,45 @@ The workbook name is `report.xlsx` and the HTML dashboard is `report.html`.
 - `schema_suggestions.sql`: add/drop column suggestions from audit diff rows
 - `logs.txt`: captured run log
 
+## Cron Job Logs
+
+Production wrapper logs live under:
+
+```text
+reports/job_logs/*.log
+reports/job_logs/<profile>/*.log
+```
+
+These files are central operational logs, not per-run forensic logs. Current
+job wrappers intentionally avoid writing fragile `run_.../logs.txt` paths in
+the central log because run directories are compacted into:
+
+```text
+reports/cron_runs/<profile>/latest/
+reports/cron_runs/<profile>/run_history.csv
+```
+
+Healthy examples:
+
+```text
+profile=<name> phase=<phase> status=COMPLETED exit_code=0 tables=<count> succeeded=<count> failed=0 skipped=0 rows_processed=<rows>
+profile=<name> phase=validate status=COMPLETED exit_code=0 rowcount_checked=<count> rowcount_mismatch=0
+```
+
+Field meanings:
+
+- `phase`: job phase, such as `incremental`, `truncate`, `sequences`, or
+  `validate`.
+- `tables` / `total_tables`: number of tables in that phase or full wrapper run.
+- `succeeded`, `failed`, `skipped`: table outcome counts.
+- `rows_processed`: rows loaded/written for that phase. On incremental jobs,
+  `0` usually means no new rows in the current window.
+- `sequences_set`: PostgreSQL sequences advanced from Oracle metadata.
+- `rowcount_checked`: tables validated by rowcount.
+- `rowcount_mismatch`: rowcount validation mismatches. Any non-zero value needs
+  investigation.
+- `raw_log`: written only on failure and points to the detailed command output.
+
 ## Excel Workbook
 
 The workbook always includes the dashboard and run summary. Detail sheets are

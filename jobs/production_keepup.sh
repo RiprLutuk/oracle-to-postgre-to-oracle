@@ -31,7 +31,7 @@ sequence_args=()
 table_scope="config:${CONFIG_PATH}"
 
 if [[ -n "${TABLES:-}" ]]; then
-  # Example: TABLES="public.a_hp_batch public.a_hp_batch_detail"
+  # Example: TABLES="public.table_a public.table_b"
   read -r -a selected_tables <<< "$TABLES"
   sync_args+=(--tables "${selected_tables[@]}")
   validate_args+=(--tables "${selected_tables[@]}")

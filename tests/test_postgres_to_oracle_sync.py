@@ -11,6 +11,8 @@ from oracle_pg_sync.sync.postgres_to_oracle import (
     PostgresToOracleSync,
     ReverseSyncResult,
     _apply_checksum_summary,
+    _clean_address_coordinate,
+    _clean_reverse_row,
     _clean_value,
 )
 
@@ -21,6 +23,24 @@ class PostgresToOracleSyncTest(unittest.TestCase):
         self.assertEqual(_clean_value("   "), " ")
         self.assertEqual(_clean_value("\x00"), " ")
         self.assertEqual(_clean_value("ABC"), "ABC")
+
+    def test_address_coordinate_cleaner_limits_oracle_trigger_precision(self):
+        self.assertEqual(_clean_address_coordinate("-7.1939710456234796"), "-7.193971045623")
+        self.assertEqual(_clean_address_coordinate("107.89907727116415"), "107.899077271164")
+        self.assertEqual(_clean_address_coordinate("not-a-coordinate"), "not-a-coordinate")
+        self.assertEqual(_clean_address_coordinate(" "), " ")
+
+    def test_reverse_row_cleans_address_coordinates_only(self):
+        row = _clean_reverse_row(
+            "address",
+            ["address_id", "latitude", "longitude", "lat_num"],
+            (1, "-7.1939710456234796", "107.89907727116415", None),
+        )
+
+        self.assertEqual(row, (1, "-7.193971045623", "107.899077271164", None))
+
+        other = _clean_reverse_row("sample", ["latitude"], ("-7.1939710456234796",))
+        self.assertEqual(other, ("-7.1939710456234796",))
 
     def test_reverse_incremental_where_uses_watermark(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -177,6 +197,15 @@ class PostgresToOracleSyncTest(unittest.TestCase):
         result.rows_written_to_oracle = 3
 
         self.assertEqual(sync._data_integrity_status(result), "UNKNOWN")
+
+    def test_reverse_incremental_upsert_can_skip_full_rowcount_validation(self):
+        sync = PostgresToOracleSync(AppConfig(oracle=OracleConfig(schema="APP"), postgres=PostgresConfig(schema="public")))
+        result = ReverseSyncResult("public.sample", "upsert", "PENDING")
+        result.rows_read_from_postgres = 3
+        result.rows_written_to_oracle = 3
+        result.validation_status = "validation_skipped_incremental_upsert"
+
+        self.assertEqual(sync._data_integrity_status(result), "PASS")
 
     def test_oracle_merge_rows_uses_merge_and_bind_rows(self):
         class Cursor:

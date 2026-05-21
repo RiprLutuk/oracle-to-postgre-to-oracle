@@ -18,7 +18,7 @@ Untuk panduan Bahasa Indonesia yang lebih ringkas untuk operator, mulai dari
 ## Install
 
 ```bash
-cd /home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit
+cd /path/to/oracle-pg-sync-audit
 python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -530,21 +530,13 @@ Examples:
 
 ```bash
 ./jobs/daily.sh oracle_to_pg
-./jobs/incremental.sh pg_to_oracle --tables public.sample_customer --mode upsert --key-columns customer_id --incremental
+./jobs/incremental.sh pg_to_oracle --tables public.sample_customer --mode upsert --key-columns customer_id --incremental --incremental-column updated_at
 ```
 
-Per-minute local reverse wrapper example:
-
-```bash
-P2O_DRY_RUN=1 ./jobs/pg_to_oracle_every_2min.sh
-P2O_DRY_RUN=0 ./jobs/pg_to_oracle_every_2min.sh
-```
-
-`jobs/pg_to_oracle_every_2min.sh` writes one centralized summary log
-to `reports/job_logs/pg_to_oracle_2min/pg_to_oracle_every_2min.log`; raw per-table logs are kept
-only for failures unless `P2O_KEEP_RAW_LOGS=1` is set. See
-[`DBA_DAILY_OPERATIONS.md`](DBA_DAILY_OPERATIONS.md#cron-postgresql---oracle-per-menit)
-for a complete crontab example.
+High-frequency reverse jobs often need site-specific table lists, keys, and
+filters. Keep those wrappers in ignored private files, or call the tracked
+`jobs/incremental.sh` wrapper with explicit `--tables`, `--key-columns`, and
+`--incremental-column` arguments from cron.
 
 Job wrapper behavior:
 

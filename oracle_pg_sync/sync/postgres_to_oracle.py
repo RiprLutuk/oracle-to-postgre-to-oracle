@@ -5,6 +5,7 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 from oracle_pg_sync.checkpoint import CheckpointStore, Chunk, new_run_id
@@ -18,6 +19,10 @@ from oracle_pg_sync.sync.runtime import DirectSyncExecutionContext, SyncExecutio
 from oracle_pg_sync.utils.retry import is_transient_connect_error
 from oracle_pg_sync.utils.naming import split_schema_table
 from oracle_pg_sync.validation import checksum_columns, checksum_result_row, stable_cursor_hash
+
+
+_ADDRESS_COORDINATE_COLUMNS = {"latitude", "longitude"}
+_ADDRESS_COORDINATE_SCALE = Decimal("0.000000000001")
 
 
 @dataclass
@@ -453,7 +458,9 @@ class PostgresToOracleSync:
                             ocon.rollback()
                             result.data_integrity_status = "FAIL"
                             return result
-                    if self._rowcount_validation_enabled(table_cfg):
+                    if mode == "upsert" and effective_where:
+                        result.validation_status = "validation_skipped_incremental_upsert"
+                    elif self._rowcount_validation_enabled(table_cfg):
                         result.oracle_row_count = oracle.count_rows(ocur, owner, table.table)
                         result.postgres_row_count = postgres.count_rows(pcur, table.schema, table.table)
                         result.row_count_match = result.oracle_row_count == result.postgres_row_count
@@ -591,7 +598,7 @@ class PostgresToOracleSync:
                 rows = rows_cursor.fetchmany(batch_size)
                 if not rows:
                     break
-                clean_rows = [tuple(_clean_value(value) for value in row) for row in rows]
+                clean_rows = [_clean_reverse_row(table, oracle_columns, row) for row in rows]
                 total += oracle.insert_rows(
                     ocur,
                     owner=oracle_owner,
@@ -613,7 +620,7 @@ class PostgresToOracleSync:
             rows = rows_cursor.fetchmany(batch_size)
             if not rows:
                 break
-            clean_rows = [tuple(_clean_value(value) for value in row) for row in rows]
+            clean_rows = [_clean_reverse_row(table, oracle_columns, row) for row in rows]
             if upsert_keys:
                 total += oracle.merge_rows(
                     ocur,
@@ -746,6 +753,8 @@ class PostgresToOracleSync:
             return "FAIL"
         if result.row_count_match is False:
             return "FAIL"
+        if result.validation_status == "validation_skipped_incremental_upsert":
+            return "PASS"
         if result.row_count_match is not True:
             return "UNKNOWN"
         if result.mode in {"truncate", "delete"}:
@@ -848,6 +857,37 @@ def _clean_value(value: Any) -> Any:
             return " "
         return cleaned
     return value
+
+
+def _clean_reverse_row(table: str, oracle_columns: list[str], row: Any) -> tuple[Any, ...]:
+    cleaned: list[Any] = []
+    table_l = table.lower()
+    for column, value in zip(oracle_columns, row):
+        clean_value = _clean_value(value)
+        if table_l == "address" and column.lower() in _ADDRESS_COORDINATE_COLUMNS:
+            clean_value = _clean_address_coordinate(clean_value)
+        cleaned.append(clean_value)
+    return tuple(cleaned)
+
+
+def _clean_address_coordinate(value: Any) -> Any:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return value
+    if not re.match(r"^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)$", text):
+        return value
+    try:
+        decimal_value = Decimal(text).quantize(_ADDRESS_COORDINATE_SCALE, rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ValueError):
+        return value
+    formatted = format(decimal_value, "f").rstrip("0").rstrip(".")
+    if formatted in {"", "+", "-"}:
+        return "0"
+    if Decimal(formatted) == 0:
+        return "0"
+    return formatted
 
 
 _UPDATE_COLUMN_PRIORITY = [

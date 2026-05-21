@@ -160,7 +160,7 @@ Oracle sequence metadata, then runs exact rowcount validation. To sync only a
 subset, pass `TABLES`:
 
 ```bash
-TABLES="public.a_hp_batch public.a_hp_batch_detail" jobs/production_keepup.sh oracle_to_pg
+TABLES="public.table_a public.table_b" jobs/production_keepup.sh oracle_to_pg
 ```
 
 Install the example crontab:
@@ -182,6 +182,13 @@ Manual sequence-only repair is also available:
 ops sync-sequences --config config.yaml --go
 ```
 
+### Site-Specific Cron Jobs
+
+Jika environment membutuhkan cron khusus di luar wrapper tracked repo, simpan
+script tersebut sebagai file ignored dan dokumentasikan detail table/key/schedule di
+runbook private. Repo public hanya boleh berisi pola umum, bukan nama object
+production atau command site-specific.
+
 Full refresh:
 
 ```bash
@@ -193,7 +200,7 @@ Incremental:
 
 ```bash
 jobs/incremental.sh oracle_to_pg
-jobs/incremental.sh pg_to_oracle --tables public.sample_customer --mode upsert --key-columns customer_id --incremental
+jobs/incremental.sh pg_to_oracle --tables public.sample_customer --mode upsert --key-columns customer_id --incremental --incremental-column updated_at
 ```
 
 Job wrapper guarantees:

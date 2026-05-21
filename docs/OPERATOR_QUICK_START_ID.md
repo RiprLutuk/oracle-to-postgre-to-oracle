@@ -253,11 +253,37 @@ ops rollback <run_id> --config config.yaml
 - Untuk job incremental reverse, selalu isi `--mode upsert`, `--key-columns`, dan `--incremental-column`.
 - Ingat: job wrapper menambahkan `--go`, jadi cron berarti execute sungguhan.
 
-Contoh cron reverse PostgreSQL -> Oracle per 2 menit ada di
-[DBA Daily Operations Guide](DBA_DAILY_OPERATIONS.md#cron-postgresql---oracle-per-2-menit).
-Uji dulu dengan `P2O_DRY_RUN=1`; setelah aman baru ganti ke
-`P2O_DRY_RUN=0`. Wrapper lokal `jobs/pg_to_oracle_every_2min.sh`
-berisi daftar table/key yang sudah di-assess untuk server ini.
+Untuk cron reverse PostgreSQL -> Oracle, pakai wrapper tracked
+`jobs/incremental.sh` atau wrapper site-specific yang disimpan di file ignored.
+Jangan commit nama table production, key business, atau schedule internal ke
+repo public.
+
+## Cek Log Cron
+
+Log utama wrapper tracked ada di `reports/job_logs/`. Baca baris terbaru dari
+file log profile yang dipakai:
+
+```bash
+find reports/job_logs -maxdepth 2 -type f -name '*.log' -print
+tail -40 reports/job_logs/<profile>.log
+```
+
+Contoh baris sehat:
+
+```text
+profile=<name> phase=<phase> status=COMPLETED exit_code=0 tables=<count> succeeded=<count> failed=0 rows_processed=<rows>
+```
+
+Cara membaca cepat:
+
+- `exit_code=0`: command phase selesai normal.
+- `failed=0`: tidak ada table gagal.
+- `rowcount_mismatch=0`: validasi rowcount cocok jika phase validate dijalankan.
+- `rows_processed=0`: normal untuk incremental jika tidak ada perubahan data.
+- `raw_log=...`: buka file itu untuk detail error jika ada failure.
+
+Jangan memakai path `run_.../logs.txt` dari log lama sebagai rujukan utama,
+karena folder run cron dipadatkan ke `reports/cron_runs/<profile>/latest/`.
 
 ## Catatan PostgreSQL ke Oracle
 

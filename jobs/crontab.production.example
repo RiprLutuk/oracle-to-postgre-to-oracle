@@ -1,25 +1,16 @@
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-PROJECT_DIR=/home/lutuk/project/pg2ora2pg/oracle-pg-sync-audit
+PROJECT_DIR=/path/to/oracle-pg-sync-audit
 
 # Keep PostgreSQL close to Oracle for critical cutoff tables.
 # The wrapper syncs data, adjusts PostgreSQL sequences from Oracle, then validates rowcount.
 # This job exits non-zero when sequence sync fails or exact validation still finds a mismatch.
-0 1 * * * cd "$PROJECT_DIR" && TIMEOUT_SECONDS=21600 RETRY=1 jobs/production_keepup.sh oracle_to_pg >> reports/job_logs/production_keepup.cron.log 2>&1
+0 1 * * * cd "$PROJECT_DIR" && mkdir -p reports/job_logs && TIMEOUT_SECONDS=21600 RETRY=1 jobs/production_keepup.sh oracle_to_pg >> reports/job_logs/daily_oracle_to_pg.log 2>&1
 
-# Refresh brim_zf_ont_autofind incrementally every minute.
-# The script also syncs only the related PostgreSQL sequence.
-* * * * * cd "$PROJECT_DIR" && mkdir -p reports/job_logs/reference_incremental && TIMEOUT_SECONDS=3600 RETRY=1 jobs/reference_tables_inc_oracle_to_pg.sh oracle_to_pg >> reports/job_logs/reference_incremental/cron.log 2>&1
-
-# Refresh GPON snapshot tables every 10 minutes.
-*/10 * * * * cd "$PROJECT_DIR" && mkdir -p reports/job_logs/reference_10m && TIMEOUT_SECONDS=7200 RETRY=1 jobs/reference_tables_10m_oracle_to_pg.sh oracle_to_pg >> reports/job_logs/reference_10m/cron.log 2>&1
-
-# Refresh slower ZF reference tables daily at 08:00.
-0 8 * * * cd "$PROJECT_DIR" && mkdir -p reports/job_logs/reference_daily && TIMEOUT_SECONDS=7200 RETRY=1 jobs/reference_tables_daily_oracle_to_pg.sh oracle_to_pg >> reports/job_logs/reference_daily/cron.log 2>&1
-
-# PostgreSQL -> Oracle every 2 minutes, disabled until go-live approval.
-#*/2 * * * * cd "$PROJECT_DIR" && mkdir -p reports/job_logs/pg_to_oracle_2min && P2O_DRY_RUN=0 RETRY=1 jobs/pg_to_oracle_every_2min.sh >> reports/job_logs/pg_to_oracle_2min/cron.log 2>&1
+# Site-specific reference/reverse jobs should live in ignored private scripts
+# or a private crontab snippet. Do not commit production table names, keys, or
+# internal schedules to this public example.
 
 # Do not enable cutoff as a regular cron.
 # Run manually inside the approved freeze window:

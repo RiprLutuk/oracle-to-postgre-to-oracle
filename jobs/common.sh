@@ -73,6 +73,13 @@ job_report_dir() {
   echo "$ROOT_DIR/reports/cron_runs/$profile"
 }
 
+table_slug() {
+  local value="$1"
+  value="${value//./_}"
+  value="${value//[^A-Za-z0-9_]/_}"
+  printf '%s\n' "$value"
+}
+
 compact_job_runs() {
   local profile="$1"
   local output_dir="${2:-$(job_report_dir "$profile")}"
@@ -277,6 +284,187 @@ run_sync_job() {
 
   if [[ "$status" -ne 0 ]]; then
     send_alert "oracle-pg-sync profile=$profile direction=$direction failed exit_code=$status log=$log_file"
+  fi
+  return "$status"
+}
+
+last_run_log_path_from_file() {
+  local file="$1"
+  sed -n 's/.*Run log dibuat: //p' "$file" 2>/dev/null | tail -1 || true
+}
+
+sync_result_summary_from_run_log() {
+  local run_log="$1"
+  local sync_result
+  sync_result="$(dirname "$run_log")/sync_result.csv"
+
+  if [[ -z "$run_log" || ! -f "$sync_result" ]]; then
+    printf 'tables=0 succeeded=0 failed=0 skipped=0 rows_processed=0\n'
+    return
+  fi
+
+  "$PYTHON_BIN" - "$sync_result" <<'PY'
+import csv
+import sys
+
+path = sys.argv[1]
+total = succeeded = failed = skipped = rows = 0
+with open(path, newline="", encoding="utf-8") as fh:
+    for row in csv.DictReader(fh):
+        total += 1
+        status = (row.get("status") or "").upper()
+        if status in {"SUCCESS", "DRY_RUN", "WARNING"}:
+            succeeded += 1
+        elif status == "SKIPPED":
+            skipped += 1
+        elif status == "FAILED":
+            failed += 1
+        try:
+            rows += int(row.get("rows_loaded") or 0)
+        except ValueError:
+            pass
+print(f"tables={total} succeeded={succeeded} failed={failed} skipped={skipped} rows_processed={rows}")
+PY
+}
+
+sequence_summary_from_log() {
+  local file="$1"
+  local set_count skipped_count failed_count
+  set_count="$(grep -c 'Sequence set ' "$file" 2>/dev/null || true)"
+  skipped_count="$(grep -c 'Sequence skip ' "$file" 2>/dev/null || true)"
+  failed_count="$(grep -Ec 'Sequence .*FAILED' "$file" 2>/dev/null || true)"
+  printf 'sequences_set=%s sequences_skipped=%s sequence_errors=%s\n' "$set_count" "$skipped_count" "$failed_count"
+}
+
+validation_summary_from_log() {
+  local file="$1"
+  "$PYTHON_BIN" - "$file" <<'PY'
+import re
+import sys
+
+path = sys.argv[1]
+checked = mismatch = 0
+with open(path, encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        match = re.search(r"Rowcount .* diff=([-0-9]+)", line)
+        if not match:
+            continue
+        checked += 1
+        if int(match.group(1)) != 0:
+            mismatch += 1
+print(f"rowcount_checked={checked} rowcount_mismatch={mismatch}")
+PY
+}
+
+strip_runtime_artifact_paths() {
+  local file="$1"
+  [[ -f "$file" ]] || return 0
+  sed -i \
+    -e '/Run log dibuat:/d' \
+    -e '/Manifest dibuat:/d' \
+    "$file"
+}
+
+run_sync_job_clean() {
+  local profile="$1"
+  local direction="$2"
+  local direction_slug="$3"
+  local phase="$4"
+  local log_file="$5"
+  shift 5
+
+  local lock_file
+  local cli_profile
+  local status=1
+  local attempt
+  local raw_dir
+  local tmp_log
+  local raw_log
+  local run_log
+  local summary
+
+  lock_file="$(job_lock_file "$profile" "$direction_slug")"
+  cli_profile="${OPS_PROFILE:-$profile}"
+  raw_dir="$LOG_DIR/raw"
+  tmp_log="$(mktemp)"
+
+  cd "$ROOT_DIR"
+  set +e
+  for attempt in $(seq 1 "$RETRY"); do
+    printf '%s profile=%s phase=%s attempt=%s direction=%s\n' "$(date -Is)" "$profile" "$phase" "$attempt" "$direction" >> "$tmp_log"
+    timeout "$TIMEOUT_SECONDS" "$PYTHON_BIN" -m oracle_pg_sync.ops sync \
+      --config "$CONFIG_PATH" \
+      --profile "$cli_profile" \
+      --direction "$direction" \
+      --go \
+      --lock-file "$lock_file" \
+      --log-rotate-bytes "$LOG_ROTATE_BYTES" \
+      "$@" >> "$tmp_log" 2>&1
+    status=$?
+    printf '%s profile=%s phase=%s attempt=%s exit_code=%s\n' "$(date -Is)" "$profile" "$phase" "$attempt" "$status" >> "$tmp_log"
+    [[ "$status" -eq 0 ]] && break
+    sleep "$((attempt * 5))"
+  done
+  set -e
+
+  run_log="$(last_run_log_path_from_file "$tmp_log")"
+  summary="$(sync_result_summary_from_run_log "$run_log")"
+  if [[ "$status" -eq 0 ]]; then
+    rm -f "$tmp_log"
+    echo "$(date -Is) $profile phase=$phase status=COMPLETED exit_code=0 $summary" >> "$log_file"
+  else
+    mkdir -p "$raw_dir"
+    raw_log="$raw_dir/${profile}_${phase}_$(date +%Y%m%d%H%M%S).log"
+    strip_runtime_artifact_paths "$tmp_log"
+    mv "$tmp_log" "$raw_log"
+    echo "$(date -Is) $profile phase=$phase status=FAILED exit_code=$status $summary raw_log=$raw_log" >> "$log_file"
+    send_alert "oracle-pg-sync profile=$profile phase=$phase direction=$direction failed exit_code=$status raw_log=$raw_log"
+  fi
+  return "$status"
+}
+
+run_command_phase_clean() {
+  local profile="$1"
+  local phase="$2"
+  local log_file="$3"
+  shift 3
+
+  local status=1
+  local raw_dir
+  local tmp_log
+  local raw_log
+  local summary
+
+  raw_dir="$LOG_DIR/raw"
+  tmp_log="$(mktemp)"
+
+  set +e
+  timeout "$TIMEOUT_SECONDS" "$@" >> "$tmp_log" 2>&1
+  status=$?
+  set -e
+
+  case "$phase" in
+    sequences)
+      summary="$(sequence_summary_from_log "$tmp_log")"
+      ;;
+    validate)
+      summary="$(validation_summary_from_log "$tmp_log")"
+      ;;
+    *)
+      summary=""
+      ;;
+  esac
+
+  if [[ "$status" -eq 0 ]]; then
+    rm -f "$tmp_log"
+    echo "$(date -Is) $profile phase=$phase status=COMPLETED exit_code=0 $summary" >> "$log_file"
+  else
+    mkdir -p "$raw_dir"
+    raw_log="$raw_dir/${profile}_${phase}_$(date +%Y%m%d%H%M%S).log"
+    strip_runtime_artifact_paths "$tmp_log"
+    mv "$tmp_log" "$raw_log"
+    echo "$(date -Is) $profile phase=$phase status=FAILED exit_code=$status $summary raw_log=$raw_log" >> "$log_file"
+    send_alert "oracle-pg-sync profile=$profile phase=$phase failed exit_code=$status raw_log=$raw_log"
   fi
   return "$status"
 }
